@@ -533,76 +533,29 @@ app.post("/api/ai/volatility-analysis", async (req, res) => {
     const ai = getGeminiClient();
 
     // ==========================================
-    // TIER 1: INTAKE LAYER (gemini-3.1-flash-lite)
+    // CONSOLIDATED FREE TIER GROUNDED MODEL (gemini-3.1-flash-lite)
     // ==========================================
-    console.log(`Tier 1 Intake Layer: Activating gemini-3.1-flash-lite. Reference price is currently ${refPrice} ${refCurrency}...`);
-    const intakePrompt = `Perform a live web search for recent Bitcoin price volatility, Spot ETF flows, and macroeconomic interest rate/CPI decisions.
-The current Bitcoin price is around ${refPrice} ${refCurrency} (which is clearly below $60,000 USD). Ground all of your search and structural level extraction in this current sub-$60k price context.
-Filter out the noise, extract the key metrics, and format them into a structured JSON containing the major anomalies and data points.
-Do not write any commentary. Return ONLY a valid JSON object matching this schema:
-{
-  "etfFlows": "summarized ETF flows, e.g. Spot Bitcoin ETFs net outflows/inflows",
-  "macroFactors": ["factor 1", "factor 2"],
-  "technicalLevels": {
-    "support": "price range aligned with the current price below 60k, e.g., $52,000 – $55,000",
-    "resistance": "price range aligned with the current price below 60k, e.g., $59,500 – $61,000"
-  },
-  "majorAnomalies": ["anomaly 1", "anomaly 2"],
-  "volatilityScore": "Low/Medium/High",
-  "newsSummary": "Concise summary of top 3 news events driving the market"
-}`;
-
-    const intakeResponse = await ai.models.generateContent({
-      model: "gemini-3.1-flash-lite",
-      contents: intakePrompt,
-      config: {
-        tools: [{ googleSearch: {} }],
-        responseMimeType: "application/json",
-      },
-    });
-
-    const intakeText = intakeResponse.text || "{}";
-    let curatedData;
-    try {
-      curatedData = JSON.parse(intakeText);
-    } catch (parseErr) {
-      console.warn("Intake Layer failed to output valid JSON, using standard recovery mapping:", parseErr);
-      curatedData = {
-        etfFlows: "Mixed spot ETF momentum with minor net consolidations",
-        macroFactors: ["Cautious Federal Reserve interest-rate policy guidance", "Stabilizing US Consumer Price Index (CPI) at 3.4%"],
-        technicalLevels: { support: "$52,000 – $54,500 USD", resistance: "$59,500 – $61,000 USD" },
-        majorAnomalies: ["Order book liquidations clearing long leverages below $60k"],
-        volatilityScore: "High",
-        newsSummary: "Reassessment of Fed rate trajectories keeps price pressure active under the $60,000 resistance threshold"
-      };
-    }
-
-    // ==========================================
-    // TIER 2: REASONING LAYER (gemini-3.5-flash)
-    // ==========================================
-    console.log("Tier 2 Reasoning Layer: Deploying gemini-3.5-flash to formulate deep report analysis...");
-    const reasoningPrompt = `You are the Reasoning Layer. Take the following curated, structured market data and anomalies flagged by the Intake Layer (3.1 Flash-Lite) and spend time reasoning about them to produce a highly accurate, professional, and directly analytical market report.
-Ground your report in the current price environment (around ${refPrice} ${refCurrency}, which is below $60,000 USD). Make sure support levels are set realistically lower than $60k (e.g. $52k-$55k) and resistance levels reflect the hard overhead ceiling around $59k-$61k.
-
-Structured Intake Data:
-${JSON.stringify(curatedData, null, 2)}
+    console.log(`Activating gemini-3.1-flash-lite. Reference price is currently ${refPrice} ${refCurrency}...`);
+    const prompt = `Perform a live web search for recent Bitcoin price volatility, Spot ETF flows, and macroeconomic interest rate/CPI decisions.
+The current Bitcoin price is around ${refPrice} ${refCurrency} (which is clearly below $60,000 USD). Ground all of your search and structural level extraction in this current sub-$60k price context. Set realistic support levels (e.g., $52,000 – $55,000) and resistance levels (e.g., $59,500 – $61,000).
 
 Structure your final report into the following exact sections using clean HTML tags (like <h3>, <p>, <ul>, <li>, etc.):
-1. "Core Driving Factors": Detail what is causing price fluctuations right now based on the intake data.
+1. "Core Driving Factors": Detail what is causing price fluctuations right now based on the live search data.
 2. "Macroeconomic Context": Highlight recent central bank rates, inflation reports, or currency fluctuations.
 3. "Technical Trends & Outlook": Assess support heights, resistance thresholds, and key price levels.
 
 Please ensure the tone is professional, objectively financial, and directly analytical. Avoid vague buzzwords or informal phrasing.`;
 
-    const reasoningResponse = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: reasoningPrompt,
+    const response = await ai.models.generateContent({
+      model: "gemini-3.1-flash-lite",
+      contents: prompt,
       config: {
-        systemInstruction: "You are an elite quantitative portfolio manager. Reason deeply about the structured data from the Intake Layer to output highly accurate, formatted cryptofinance summaries.",
+        systemInstruction: "You are an elite quantitative portfolio manager and cryptofinance analyst. Perform live web search to formulate deep, highly accurate, and formatted HTML cryptofinance volatility reports.",
+        tools: [{ googleSearch: {} }],
       },
     });
 
-    const finalReport = reasoningResponse.text || "<p>Analysis currently unavailable.</p>";
+    const finalReport = response.text || "<p>Analysis currently unavailable.</p>";
     
     // Save to persistent cache and disk
     persistentCache.volatility = {
@@ -644,7 +597,7 @@ Please ensure the tone is professional, objectively financial, and directly anal
   }
 });
 
-// 4. AI Dollar Cost Average suggestion Agent (using Two-Tier Architecture: 3.1 Flash-Lite + 3.5 Flash)
+// 4. AI Dollar Cost Average suggestion Agent (using single-call free-tier gemini-3.1-flash-lite with googleSearch)
 app.post("/api/ai/dca-advisor", async (req, res) => {
   const { budget, frequency, timeHorizon, riskProfile, currentPrice, currency } = req.body;
   const currencySymbol = currency === "AUD" ? "AUD" : "USD";
@@ -663,48 +616,11 @@ app.post("/api/ai/dca-advisor", async (req, res) => {
     const ai = getGeminiClient();
 
     // ==========================================
-    // TIER 1: INTAKE LAYER (gemini-3.1-flash-lite)
+    // CONSOLIDATED FREE TIER GROUNDED MODEL (gemini-3.1-flash-lite)
     // ==========================================
-    console.log("Tier 1 Intake Layer: Activating gemini-3.1-flash-lite to scrape & filter DCA macro conditions...");
-    const intakePrompt = `Perform a live web search for institutional Bitcoin sentiments, BlackRock & Fidelity Spot ETF inflows/outflows, Grayscale selling pressures, and key upcoming FOMC macroeconomic events.
-Filter out the noise, extract key metrics/anomalies, and output a structured JSON containing these elements:
-{
-  "etfSentiment": "summarized institutional spot ETF flows and sentiment",
-  "grayscaleOutflows": "details on Grayscale or other ETF selling pressure",
-  "macroEvents": ["FOMC date/decision", "CPI release or inflation data"],
-  "marketHighLowRange": "estimated recent 30-day range",
-  "anomalies": ["significant anomalies flagged in flows or macro policies"]
-}`;
-
-    const intakeResponse = await ai.models.generateContent({
-      model: "gemini-3.1-flash-lite",
-      contents: intakePrompt,
-      config: {
-        tools: [{ googleSearch: {} }],
-        responseMimeType: "application/json",
-      },
-    });
-
-    const intakeText = intakeResponse.text || "{}";
-    let curatedData;
-    try {
-      curatedData = JSON.parse(intakeText);
-    } catch (parseErr) {
-      console.warn("DCA Intake Layer failed to output valid JSON, using standard recovery mapping:", parseErr);
-      curatedData = {
-        etfSentiment: "Continuous accumulation by BlackRock and Fidelity Spot ETFs",
-        grayscaleOutflows: "Moderating outflows from Grayscale",
-        macroEvents: ["Upcoming FOMC interest rate decision", "Consumer Price Index update"],
-        marketHighLowRange: "$62,500 – $69,000",
-        anomalies: ["Liquidity clusters above $69,000 targeting shorts"]
-      };
-    }
-
-    // ==========================================
-    // TIER 2: REASONING LAYER (gemini-3.5-flash)
-    // ==========================================
-    console.log("Tier 2 Reasoning Layer: Deploying gemini-3.5-flash to formulate DCA strategy advisory...");
-    const userPrompt = `You are the Reasoning Layer. Take the curated market intelligence from the Intake Layer (3.1 Flash-Lite) and formulate a highly customized, safe, and tactical Bitcoin DCA model based on these parameters:
+    console.log("Activating gemini-3.1-flash-lite to scrape & filter DCA macro conditions...");
+    const prompt = `Perform a live web search for institutional Bitcoin sentiments, BlackRock & Fidelity Spot ETF inflows/outflows, Grayscale selling pressures, and key upcoming FOMC macroeconomic events.
+Then, formulate a highly customized, safe, and tactical Bitcoin DCA model based on these parameters:
 
 User DCA Parameters:
 - **Periodic Investing Budget:** ${currencyChar}${budget || 100} ${currencySymbol}
@@ -713,26 +629,24 @@ User DCA Parameters:
 - **Risk Tolerance Profile:** ${riskProfile || "Moderate"}
 - **Estimated Current Reference Price:** ${currencyChar}${currentPrice || 67000} ${currencySymbol}
 
-Curated Intake Data:
-${JSON.stringify(curatedData, null, 2)}
-
 Provide a highly scannable tactical blueprint containing:
 1. "Strategic DCA Routine": Break down the suggested regular investment and any potential dynamic 'scaling strategies' (e.g., investing 20% more if Fear & Greed Index drops below 30).
-2. "Institutional & Macro Sentiment": Highlight recent Spot ETF net flows, Grayscale dynamics, macro inflation markers, and central bank parameters.
+2. "Institutional & Macro Sentiment": Highlight recent Spot ETF net flows, Grayscale dynamics, macro inflation markers, and central bank parameters based on live search results.
 3. "Upcoming Catalysts & Risks": List upcoming economic events (FOMC meetings, rate cuts, inflation releases) that the user should observe.
 4. "Historic Price Threshold Matrix": Propose price thresholds (e.g. -10%, -20% from local highs) for 'bonus buy' opportunistic allocations.
 
 Write output using cleanly formatted HTML tags (like <h3>, <p>, <strong>, and lists <ul>/<li>) so it aligns elegantly in our modern crypto dashboard interface. Keep it objective, professional, and clear. Ensure you state at the bottom that this is informational research and not financial advice.`;
 
-    const reasoningResponse = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: userPrompt,
+    const response = await ai.models.generateContent({
+      model: "gemini-3.1-flash-lite",
+      contents: prompt,
       config: {
-        systemInstruction: "You are an elite quantitative cryptofinance analyst. Synthesize institutional flows, macro events, and DCA mathematics into beautifully structured HTML advisor responses.",
+        systemInstruction: "You are an elite quantitative cryptofinance analyst. Perform live web search to synthesize institutional flows, macro events, and DCA mathematics into beautifully structured HTML advisor responses.",
+        tools: [{ googleSearch: {} }],
       },
     });
 
-    const finalStrategy = reasoningResponse.text || "<p>Blueprint currently unavailable.</p>";
+    const finalStrategy = response.text || "<p>Blueprint currently unavailable.</p>";
 
     // Save to persistent cache and disk
     persistentCache.dca[cacheKey] = {
