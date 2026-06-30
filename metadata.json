@@ -1,0 +1,6 @@
+{
+  "name": "Bitcoin Tracker & Sentiment Agent",
+  "description": "Bitcoin live tracker featuring local pricing, AI-grounded volatility news analysis, Fear & Greed sentiment index, an interactive DCA suggestion agent, and a scenarios calculator.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
