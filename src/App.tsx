@@ -73,6 +73,7 @@ export default function App() {
   // Volatility AI News states
   const [volatilityAnalysis, setVolatilityAnalysis] = useState<string>("");
   const [loadingVolatility, setLoadingVolatility] = useState(false);
+  const [volatilityModel, setVolatilityModel] = useState<string>("gemini-3.1-flash-lite");
 
   // Gemini API Quota detection state
   const [quotaExceeded, setQuotaExceeded] = useState<boolean>(false);
@@ -194,16 +195,21 @@ export default function App() {
           currency: currency
         })
       });
-      if (res.ok) {
-        const data = await res.json();
-        setVolatilityAnalysis(data.analysis);
-        if (data.isQuotaExceeded) {
-          setQuotaExceeded(true);
-        }
+      if (!res.ok) {
+        throw new Error(`Server returned status ${res.status}`);
+      }
+      const data = await res.json();
+      setVolatilityAnalysis(data.analysis || "<p>Analysis currently unavailable.</p>");
+      if (data.modelUsed) {
+        setVolatilityModel(data.modelUsed);
+      }
+      if (data.isQuotaExceeded) {
+        setQuotaExceeded(true);
       }
     } catch (err) {
       console.error("Error fetching AI news summary:", err);
       setVolatilityAnalysis(`<p class='text-red-400'>Unable to synthesise live volatility context right now.</p>`);
+      setVolatilityModel("gemini-3.1-flash-lite (Offline Fallback)");
     } finally {
       setLoadingVolatility(false);
     }
@@ -858,7 +864,7 @@ export default function App() {
               )}
 
               <div className="mt-4 pt-3 border-t border-slate-900 flex items-center justify-between text-[10px] text-slate-500">
-                <span>Model: gemini-3.5-flash</span>
+                <span>Model: {volatilityModel}</span>
                 <span>Grounding: Google Search</span>
               </div>
             </div>
@@ -1494,7 +1500,7 @@ export default function App() {
             Nexus BTC is an educational dashboard designed to capture market transparency. Bitcoin pricing feeds are pulled from Blockchain ticker APIs.
           </p>
           <p className="text-slate-600">
-            © 2026 Nexus Crypto. Grounded intelligence supported by Google Gemini 3.5.
+            © 2026 Nexus Crypto. Grounded intelligence supported by Google Gemini AI.
           </p>
         </div>
       </footer>

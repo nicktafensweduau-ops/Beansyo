@@ -454,7 +454,18 @@ app.get("/api/price-data", async (req, res) => {
     const fallbackUSD = 67000;
     const fallbackAUD = Math.round(fallbackUSD * 1.51 * 100) / 100;
     
-    const fallbackChartUSD = generateFullHistory(fallbackUSD);
+    let fallbackChartUSD;
+    try {
+      fallbackChartUSD = generateFullHistory(fallbackUSD);
+    } catch (chartErr) {
+      console.error("Failed to generate fallback chart history:", chartErr);
+      fallbackChartUSD = [
+        { date: "30 days ago", price: 65000 },
+        { date: "15 days ago", price: 66000 },
+        { date: "Today", price: 67000 }
+      ];
+    }
+
     const fallbackChartAUD = fallbackChartUSD.map(item => ({
       date: item.date,
       price: Math.round(item.price * 1.51 * 100) / 100
@@ -521,7 +532,10 @@ app.post("/api/ai/volatility-analysis", async (req, res) => {
   
   // 1. Check if we have valid cache
   if (persistentCache.volatility && now - persistentCache.volatility.timestamp < GEMINI_CACHE_TTL_MS) {
-    return res.json({ analysis: persistentCache.volatility.analysis });
+    return res.json({ 
+      analysis: persistentCache.volatility.analysis,
+      modelUsed: "gemini-3.1-flash-lite (Cached)"
+    });
   }
 
   const { currentPrice, currency } = req.body || {};
@@ -563,7 +577,10 @@ Please ensure the tone is professional, objectively financial, and directly anal
     };
     saveCacheToDisk();
 
-    return res.json({ analysis: finalReport });
+    return res.json({ 
+      analysis: finalReport,
+      modelUsed: "gemini-3.1-flash-lite"
+    });
   } catch (error: any) {
     const errMsg = error.message || "";
     const isQuotaExceeded = errMsg.includes("quota") || errMsg.includes("RESOURCE_EXHAUSTED") || errMsg.includes("429") || errMsg.includes("exceeded") || errMsg.includes("exhausted");
@@ -576,7 +593,8 @@ Please ensure the tone is professional, objectively financial, and directly anal
       return res.json({
         analysis: persistentCache.volatility.analysis,
         isFallback: true,
-        isQuotaExceeded
+        isQuotaExceeded,
+        modelUsed: "gemini-3.1-flash-lite (Offline Fallback)"
       });
     }
 
@@ -591,7 +609,8 @@ Please ensure the tone is professional, objectively financial, and directly anal
     return res.json({
       analysis: defaultFallback,
       isFallback: true,
-      isQuotaExceeded
+      isQuotaExceeded,
+      modelUsed: "gemini-3.1-flash-lite (Offline Fallback)"
     });
   }
 });
