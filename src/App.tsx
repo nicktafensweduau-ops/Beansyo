@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Coins,
   DollarSign,
@@ -20,7 +20,14 @@ import {
   Clock,
   Copy,
   Sparkles,
+  Download,
+  Upload,
+  Database,
+  FileText,
+  X,
+  FileJson,
 } from "lucide-react";
+import { motion, AnimatePresence } from "motion/react";
 import {
   AreaChart,
   Area,
@@ -64,16 +71,40 @@ export default function App() {
   // States
   // ----------------------------------------------------
   const [currency, setCurrency] = useState<"USD" | "AUD">("USD");
-  const [priceData, setPriceData] = useState<PriceResponse | null>(null);
-  const [fngData, setFngData] = useState<FearGreedData | null>(null);
+  const [priceData, setPriceData] = useState<PriceResponse | null>(() => {
+    const saved = localStorage.getItem("btc_calc_imported_price_data");
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        return null;
+      }
+    }
+    return null;
+  });
+  const [fngData, setFngData] = useState<FearGreedData | null>(() => {
+    const saved = localStorage.getItem("btc_calc_imported_fng_data");
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        return null;
+      }
+    }
+    return null;
+  });
   
-  const [loadingPrice, setLoadingPrice] = useState(true);
-  const [loadingFng, setLoadingFng] = useState(true);
+  const [loadingPrice, setLoadingPrice] = useState(() => !localStorage.getItem("btc_calc_imported_price_data"));
+  const [loadingFng, setLoadingFng] = useState(() => !localStorage.getItem("btc_calc_imported_fng_data"));
 
   // Volatility AI News states
-  const [volatilityAnalysis, setVolatilityAnalysis] = useState<string>("");
-  const [loadingVolatility, setLoadingVolatility] = useState(false);
-  const [volatilityModel, setVolatilityModel] = useState<string>("gemini-3.1-flash-lite");
+  const [volatilityAnalysis, setVolatilityAnalysis] = useState<string>(() => {
+    return localStorage.getItem("btc_calc_imported_volatility") || "";
+  });
+  const [loadingVolatility, setLoadingVolatility] = useState(() => !localStorage.getItem("btc_calc_imported_volatility"));
+  const [volatilityModel, setVolatilityModel] = useState<string>(() => {
+    return localStorage.getItem("btc_calc_imported_volatility_model") || "gemini-3.1-flash-lite";
+  });
 
   // Gemini API Quota detection state
   const [quotaExceeded, setQuotaExceeded] = useState<boolean>(false);
@@ -115,6 +146,14 @@ export default function App() {
   const [chartDaysFilter, setChartDaysFilter] = useState<1 | 7 | 14 | 30 | 365 | 1460 | 9999>(30);
   const [copiedAdvisory, setCopiedAdvisory] = useState<boolean>(false);
   const [estimatedBlockHeight, setEstimatedBlockHeight] = useState<number>(848521);
+
+  // Synchronization Hub states
+  const [isSyncOpen, setIsSyncOpen] = useState<boolean>(false);
+  const [syncClipboardSuccess, setSyncClipboardSuccess] = useState<boolean>(false);
+  const [syncImportError, setSyncImportError] = useState<string | null>(null);
+  const [syncImportSuccess, setSyncImportSuccess] = useState<string | null>(null);
+  const [syncPasteText, setSyncPasteText] = useState<string>("");
+  const [isSyncDragging, setIsSyncDragging] = useState<boolean>(false);
 
   // Dynamic network block tick simulation
   useEffect(() => {
@@ -208,8 +247,14 @@ export default function App() {
       }
     } catch (err) {
       console.error("Error fetching AI news summary:", err);
-      setVolatilityAnalysis(`<p class='text-red-400'>Unable to synthesise live volatility context right now.</p>`);
-      setVolatilityModel("gemini-3.1-flash-lite (Offline Fallback)");
+      const savedImported = localStorage.getItem("btc_calc_imported_volatility");
+      if (savedImported) {
+        setVolatilityAnalysis(savedImported);
+        setVolatilityModel(localStorage.getItem("btc_calc_imported_volatility_model") || "gemini-3.1-flash-lite (Imported Offline)");
+      } else {
+        setVolatilityAnalysis(`<p class='text-red-400'>Unable to synthesise live volatility context right now.</p>`);
+        setVolatilityModel("gemini-3.1-flash-lite (Offline Fallback)");
+      }
     } finally {
       setLoadingVolatility(false);
     }
@@ -244,6 +289,157 @@ export default function App() {
       setInvestAmount(Math.round(investAmount / rate));
       setCalcEntryPrice(Math.round(calcEntryPrice / rate));
       setCalcExitPrice(Math.round(calcExitPrice / rate));
+    }
+  };
+
+  // ----------------------------------------------------
+  // Page State Synchronization Hub Helpers
+  // ----------------------------------------------------
+  const handleExportData = () => {
+    const backup = {
+      brand: "NEXUS_BTC_DATA_SNAPSHOT",
+      version: "2.5",
+      exportedAt: new Date().toISOString(),
+      calculator: {
+        btc_calc_currency: calcCurrency,
+        btc_calc_input_mode: calcInputMode,
+        btc_calc_btc_amount: calcBtcAmount,
+        btc_calc_invest_amount: investAmount,
+        btc_calc_entry_price: calcEntryPrice,
+        btc_calc_exit_price: calcExitPrice
+      },
+      states: {
+        currency: currency,
+        estimatedBlockHeight: estimatedBlockHeight,
+        chartDaysFilter: chartDaysFilter,
+        projectionMethod: projectionMethod
+      },
+      gemini: {
+        volatilityAnalysis: volatilityAnalysis,
+        volatilityModel: volatilityModel
+      },
+      market: {
+        priceData: priceData,
+        fngData: fngData
+      }
+    };
+    return JSON.stringify(backup, null, 2);
+  };
+
+  const copyBackupToClipboard = async () => {
+    const jsonStr = handleExportData();
+    try {
+      await navigator.clipboard.writeText(jsonStr);
+      setSyncClipboardSuccess(true);
+      setTimeout(() => setSyncClipboardSuccess(false), 3000);
+    } catch (err) {
+      console.error("Clipboard write blocked. Standard fallback text selection fallback remains active.");
+      // Fallback
+      setSyncClipboardSuccess(false);
+    }
+  };
+
+  const downloadBackupFile = () => {
+    const jsonStr = handleExportData();
+    const blob = new Blob([jsonStr], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `nexus_btc_backup_${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImportData = (rawJson: string): { success: boolean; message: string } => {
+    try {
+      const data = JSON.parse(rawJson);
+      if (!data || data.brand !== "NEXUS_BTC_DATA_SNAPSHOT") {
+        throw new Error("Invalid backup format. Ensure you import a valid NEXUS BTC Snapshot file.");
+      }
+
+      // 1. Calculator states
+      if (data.calculator) {
+        const calc = data.calculator;
+        if (calc.btc_calc_currency) {
+          setCalcCurrency(calc.btc_calc_currency);
+          localStorage.setItem("btc_calc_currency", calc.btc_calc_currency);
+        }
+        if (calc.btc_calc_input_mode) {
+          setCalcInputMode(calc.btc_calc_input_mode);
+          localStorage.setItem("btc_calc_input_mode", calc.btc_calc_input_mode);
+        }
+        if (calc.btc_calc_btc_amount !== undefined) {
+          setCalcBtcAmount(Number(calc.btc_calc_btc_amount));
+          localStorage.setItem("btc_calc_btc_amount", calc.btc_calc_btc_amount.toString());
+        }
+        if (calc.btc_calc_invest_amount !== undefined) {
+          setInvestAmount(Number(calc.btc_calc_invest_amount));
+          localStorage.setItem("btc_calc_invest_amount", calc.btc_calc_invest_amount.toString());
+        }
+        if (calc.btc_calc_entry_price !== undefined) {
+          setCalcEntryPrice(Number(calc.btc_calc_entry_price));
+          localStorage.setItem("btc_calc_entry_price", calc.btc_calc_entry_price.toString());
+        }
+        if (calc.btc_calc_exit_price !== undefined) {
+          setCalcExitPrice(Number(calc.btc_calc_exit_price));
+          localStorage.setItem("btc_calc_exit_price", calc.btc_calc_exit_price.toString());
+        }
+      }
+
+      // 2. Main Page states
+      if (data.states) {
+        const st = data.states;
+        if (st.currency) {
+          setCurrency(st.currency);
+        }
+        if (st.estimatedBlockHeight !== undefined) {
+          setEstimatedBlockHeight(Number(st.estimatedBlockHeight));
+        }
+        if (st.chartDaysFilter !== undefined) {
+          setChartDaysFilter(Number(st.chartDaysFilter) as any);
+        }
+        if (st.projectionMethod) {
+          setProjectionMethod(st.projectionMethod);
+        }
+      }
+
+      // 3. Gemini reports
+      if (data.gemini) {
+        const gem = data.gemini;
+        if (gem.volatilityAnalysis) {
+          setVolatilityAnalysis(gem.volatilityAnalysis);
+          localStorage.setItem("btc_calc_imported_volatility", gem.volatilityAnalysis);
+        }
+        if (gem.volatilityModel) {
+          setVolatilityModel(gem.volatilityModel);
+          localStorage.setItem("btc_calc_imported_volatility_model", gem.volatilityModel);
+        }
+      }
+
+      // 4. Market cache
+      if (data.market) {
+        const mkt = data.market;
+        if (mkt.priceData) {
+          setPriceData(mkt.priceData);
+          localStorage.setItem("btc_calc_imported_price_data", JSON.stringify(mkt.priceData));
+        }
+        if (mkt.fngData) {
+          setFngData(mkt.fngData);
+          localStorage.setItem("btc_calc_imported_fng_data", JSON.stringify(mkt.fngData));
+        }
+      }
+
+      // Turn off loading screens if data was successfully injected
+      setLoadingPrice(false);
+      setLoadingFng(false);
+      setLoadingVolatility(false);
+
+      return { success: true, message: "Application state restored successfully!" };
+    } catch (err: any) {
+      console.error("Failed to parse import data:", err);
+      return { success: false, message: err.message || "Invalid JSON syntax" };
     }
   };
 
@@ -543,6 +739,20 @@ export default function App() {
                 AUD (A$)
               </button>
             </div>
+
+            {/* Sync Hub Button */}
+            <button
+              onClick={() => {
+                setIsSyncOpen(true);
+                setSyncImportError(null);
+                setSyncImportSuccess(null);
+              }}
+              className="bg-slate-950 hover:bg-slate-900 border border-slate-800 hover:border-slate-700 text-amber-400 hover:text-amber-300 px-3 py-2 rounded-xl flex items-center gap-2 text-[11px] font-bold cursor-pointer transition active:scale-95 shadow-md shrink-0"
+              title="Backup, export, or import page data"
+            >
+              <Database className="w-3.5 h-3.5 text-amber-500 animate-pulse" />
+              <span>Sync Hub</span>
+            </button>
 
             {/* Active Pricing Panel */}
             <div className="bg-slate-950 border border-slate-800 px-3.5 py-1.5 rounded-xl flex items-center gap-3">
@@ -1504,6 +1714,293 @@ export default function App() {
           </p>
         </div>
       </footer>
+
+      {/* ----------------- Synchronization Hub Modal ----------------- */}
+      <AnimatePresence>
+        {isSyncOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md overflow-y-auto">
+            {/* Modal Backdrop animation */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsSyncOpen(false)}
+              className="absolute inset-0 cursor-default"
+            />
+
+            {/* Modal Body */}
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0, y: 15 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 15 }}
+              transition={{ type: "spring", duration: 0.4 }}
+              className="bg-slate-900 border border-slate-850 rounded-2xl w-full max-w-xl shadow-2xl relative overflow-hidden z-10 flex flex-col text-left"
+            >
+              {/* Decorative top border */}
+              <div className="h-1 w-full bg-gradient-to-r from-amber-500 via-orange-500 to-yellow-500" />
+
+              {/* Close Button */}
+              <button
+                onClick={() => setIsSyncOpen(false)}
+                className="absolute top-4 right-4 p-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 text-slate-400 hover:text-white transition cursor-pointer"
+                title="Close Sync Hub"
+              >
+                <X className="w-4 h-4" />
+              </button>
+
+              <div className="p-6 space-y-5">
+                {/* Header Title */}
+                <div className="flex gap-4 items-start">
+                  <div className="p-3 bg-amber-500/10 text-amber-500 rounded-xl border border-amber-500/20 shrink-0">
+                    <Database className="w-6 h-6 animate-pulse" />
+                  </div>
+                  <div>
+                    <h3 className="text-base sm:text-lg font-bold text-white tracking-tight">
+                      Page Data Synchronization Hub
+                    </h3>
+                    <p className="text-xs text-slate-400 leading-relaxed mt-1">
+                      Backup, export, or import your entire active application state. This acts as a complete snapshot of your calculators, indicators, and Gemini volatility intelligence reports, bypassing API quota limits on published versions.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Info Box to Explain Quota Resolution */}
+                <div className="bg-slate-950/70 border border-slate-850 p-3.5 rounded-xl space-y-1">
+                  <span className="text-[10px] bg-emerald-950/60 text-emerald-400 border border-emerald-900/40 px-2 py-0.5 rounded font-mono font-bold">
+                    PRO-TIP: QUOTA EXCEEDED WORKAROUND
+                  </span>
+                  <p className="text-[11px] text-slate-350 leading-relaxed">
+                    If your published version encounters model quota limits, simply open this application in your <strong>development environment</strong> (where the Gemini model is refreshed), click <strong>Export Snapshot</strong>, and then import that file on your published version to restore all data instantly!
+                  </p>
+                </div>
+
+                {/* Grid 1: Active Snapshot Preview & Export */}
+                <div className="border border-slate-850/60 rounded-xl p-4 bg-slate-950/30 space-y-3.5">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-extrabold uppercase text-slate-400 tracking-wider flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                      1. Active State Snapshot
+                    </h4>
+                    <span className="text-[10px] font-mono text-slate-500 bg-slate-950 px-2 py-0.5 rounded">
+                      V2.5
+                    </span>
+                  </div>
+
+                  {/* Visual grid status tags */}
+                  <div className="grid grid-cols-2 gap-2 text-[11px]">
+                    <div className="bg-slate-950 border border-slate-850 p-2 rounded-lg">
+                      <span className="block text-[9px] uppercase tracking-wider text-slate-500 font-semibold">Live Spot Prices</span>
+                      <span className="font-mono font-bold text-white">
+                        {priceData ? `USD $${Math.round(priceData.USD.livePrice).toLocaleString()} / AUD $${Math.round(priceData.AUD.livePrice).toLocaleString()}` : "Not loaded"}
+                      </span>
+                    </div>
+                    <div className="bg-slate-950 border border-slate-850 p-2 rounded-lg">
+                      <span className="block text-[9px] uppercase tracking-wider text-slate-500 font-semibold">Gemini Intelligence Report</span>
+                      <span className="font-bold text-emerald-400 flex items-center gap-1">
+                        {volatilityAnalysis ? "✓ Generated" : "✗ Not generated"}
+                        <span className="text-[9px] text-slate-500 font-mono">({volatilityAnalysis ? `${Math.round(volatilityAnalysis.length / 100) / 10} KB` : "0 KB"})</span>
+                      </span>
+                    </div>
+                    <div className="bg-slate-950 border border-slate-850 p-2 rounded-lg">
+                      <span className="block text-[9px] uppercase tracking-wider text-slate-500 font-semibold">Saved Calculator Settings</span>
+                      <span className="font-mono text-amber-400 font-bold">
+                        {investAmount ? `${calcCurrency === "USD" ? "$" : "A$"}${investAmount.toLocaleString()} Invest` : "6 Params Ready"}
+                      </span>
+                    </div>
+                    <div className="bg-slate-950 border border-slate-850 p-2 rounded-lg">
+                      <span className="block text-[9px] uppercase tracking-wider text-slate-500 font-semibold">Fear & Greed Sentiment</span>
+                      <span className="font-mono font-bold text-slate-300">
+                        {fngData ? `${fngData.value} (${fngData.sentiment})` : "Not loaded"}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Export Options Row */}
+                  <div className="flex flex-col sm:flex-row items-stretch gap-2.5 pt-1">
+                    <button
+                      onClick={downloadBackupFile}
+                      className="flex-1 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-slate-950 font-extrabold px-4 py-2.5 rounded-xl text-xs flex items-center justify-center gap-2 cursor-pointer transition transform active:scale-[0.98] shadow-lg shadow-orange-500/10"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Export Snapshot File (.json)</span>
+                    </button>
+                    <button
+                      onClick={copyBackupToClipboard}
+                      className="bg-slate-950 hover:bg-slate-850 border border-slate-800 hover:border-slate-700 text-slate-300 hover:text-white px-4 py-2.5 rounded-xl text-xs flex items-center justify-center gap-2 cursor-pointer transition"
+                    >
+                      {syncClipboardSuccess ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-emerald-400" />
+                          <span className="text-emerald-400 font-bold">Copied to Clipboard!</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5" />
+                          <span>Copy Clipboard Payload</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Grid 2: Import Snapshot */}
+                <div className="border border-slate-850/60 rounded-xl p-4 bg-slate-950/30 space-y-3.5">
+                  <h4 className="text-xs font-extrabold uppercase text-slate-400 tracking-wider flex items-center gap-1.5">
+                    <Upload className="w-3.5 h-3.5 text-emerald-400" />
+                    2. Import & Restore Snapshot State
+                  </h4>
+
+                  {/* Drop zone file input */}
+                  <div
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      setIsSyncDragging(true);
+                    }}
+                    onDragLeave={() => setIsSyncDragging(false)}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      setIsSyncDragging(false);
+                      const file = e.dataTransfer.files?.[0];
+                      if (file) {
+                        const reader = new FileReader();
+                        reader.onload = (event) => {
+                          const text = event.target?.result as string;
+                          const res = handleImportData(text);
+                          if (res.success) {
+                            setSyncImportSuccess(res.message);
+                            setSyncImportError(null);
+                          } else {
+                            setSyncImportError(res.message);
+                            setSyncImportSuccess(null);
+                          }
+                        };
+                        reader.readAsText(file);
+                      }
+                    }}
+                    className={`border-2 border-dashed rounded-xl p-5 text-center cursor-pointer transition flex flex-col items-center justify-center gap-2 ${
+                      isSyncDragging
+                        ? "border-amber-400 bg-amber-500/5 text-amber-300"
+                        : "border-slate-850 hover:border-slate-700 bg-slate-950/40 text-slate-400 hover:text-slate-300"
+                    }`}
+                    onClick={() => {
+                      const input = document.createElement("input");
+                      input.type = "file";
+                      input.accept = ".json";
+                      input.onchange = (e) => {
+                        const file = (e.target as HTMLInputElement).files?.[0];
+                        if (file) {
+                          const reader = new FileReader();
+                          reader.onload = (event) => {
+                            const text = event.target?.result as string;
+                            const res = handleImportData(text);
+                            if (res.success) {
+                              setSyncImportSuccess(res.message);
+                              setSyncImportError(null);
+                            } else {
+                              setSyncImportError(res.message);
+                              setSyncImportSuccess(null);
+                            }
+                          };
+                          reader.readAsText(file);
+                        }
+                      };
+                      input.click();
+                    }}
+                  >
+                    <FileJson className="w-7 h-7 text-slate-500 animate-pulse" />
+                    <p className="text-[11px] font-bold">
+                      Drag & drop your backup .json file here, or <span className="text-amber-400 underline decoration-dotted">browse files</span>
+                    </p>
+                    <p className="text-[9px] text-slate-500">Only genuine NEXUS_BTC backup JSON files are supported</p>
+                  </div>
+
+                  {/* Text area paste alternative */}
+                  <div className="space-y-1.5">
+                    <label className="block text-[10px] text-slate-500 font-bold uppercase tracking-wide">
+                      Alternative: Paste JSON Text Payload
+                    </label>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        placeholder='{"brand": "NEXUS_BTC_DATA_SNAPSHOT", ...}'
+                        value={syncPasteText}
+                        onChange={(e) => setSyncPasteText(e.target.value)}
+                        className="flex-1 bg-slate-950 border border-slate-850 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-amber-500 font-mono"
+                      />
+                      <button
+                        onClick={() => {
+                          if (!syncPasteText.trim()) {
+                            setSyncImportError("Please paste a non-empty backup payload.");
+                            return;
+                          }
+                          const res = handleImportData(syncPasteText);
+                          if (res.success) {
+                            setSyncImportSuccess(res.message);
+                            setSyncImportError(null);
+                            setSyncPasteText("");
+                          } else {
+                            setSyncImportError(res.message);
+                            setSyncImportSuccess(null);
+                          }
+                        }}
+                        className="bg-slate-800 hover:bg-slate-750 border border-slate-700 text-slate-200 px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition active:scale-95"
+                      >
+                        Restore State
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Success Alert */}
+                  {syncImportSuccess && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -5 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="bg-emerald-500/10 border border-emerald-500/20 p-2.5 rounded-lg flex items-center gap-2.5 text-emerald-400 text-[11px]"
+                    >
+                      <Check className="w-4 h-4 shrink-0" />
+                      <div className="flex-1 font-semibold">{syncImportSuccess}</div>
+                      <button
+                        onClick={() => setSyncImportSuccess(null)}
+                        className="text-emerald-500 hover:text-emerald-300 p-0.5 rounded"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </motion.div>
+                  )}
+
+                  {/* Error Alert */}
+                  {syncImportError && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -5 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="bg-rose-500/10 border border-rose-500/20 p-2.5 rounded-lg flex items-center gap-2.5 text-rose-400 text-[11px]"
+                    >
+                      <X className="w-4 h-4 shrink-0" />
+                      <div className="flex-1 font-semibold">{syncImportError}</div>
+                      <button
+                        onClick={() => setSyncImportError(null)}
+                        className="text-rose-500 hover:text-rose-300 p-0.5 rounded"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </motion.div>
+                  )}
+                </div>
+              </div>
+
+              {/* Bottom Actions */}
+              <div className="bg-slate-950 border-t border-slate-850 px-6 py-4 flex items-center justify-end">
+                <button
+                  onClick={() => setIsSyncOpen(false)}
+                  className="bg-slate-800 hover:bg-slate-750 text-slate-300 hover:text-white px-4 py-2 rounded-xl text-xs font-bold cursor-pointer transition"
+                >
+                  Close Sync Hub
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

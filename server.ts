@@ -44,6 +44,9 @@ let persistentCache: PersistentCache = {
   dca: {}
 };
 
+let lastQuotaExceededTime = 0;
+const QUOTA_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes cooldown period
+
 function loadOrCreateCache() {
   try {
     if (fs.existsSync(CACHE_FILE)) {
@@ -529,18 +532,31 @@ app.get("/api/fear-greed", async (req, res) => {
 // 3. AI News Summary on Volatility Driving Factors (using Two-Tier Architecture: 3.1 Flash-Lite + 3.5 Flash)
 app.post("/api/ai/volatility-analysis", async (req, res) => {
   const now = Date.now();
+
+  const { currentPrice, currency } = req.body || {};
+  const refPrice = currentPrice ? Math.round(currentPrice) : 58300;
+  const refCurrency = currency || "USD";
+
+  // 1. Check if we are in Quota Cooldown Mode
+  if (now - lastQuotaExceededTime < QUOTA_COOLDOWN_MS) {
+    console.log("[Gemini API] Quota-saver mode active. Serving offline fallback volatility analysis seamlessly.");
+    if (persistentCache.volatility) {
+      return res.json({
+        analysis: persistentCache.volatility.analysis,
+        isFallback: true,
+        isQuotaExceeded: true,
+        modelUsed: "gemini-3.1-flash-lite (Offline Fallback)"
+      });
+    }
+  }
   
-  // 1. Check if we have valid cache
+  // 2. Check if we have valid cache
   if (persistentCache.volatility && now - persistentCache.volatility.timestamp < GEMINI_CACHE_TTL_MS) {
     return res.json({ 
       analysis: persistentCache.volatility.analysis,
       modelUsed: "gemini-3.1-flash-lite (Cached)"
     });
   }
-
-  const { currentPrice, currency } = req.body || {};
-  const refPrice = currentPrice ? Math.round(currentPrice) : 58300;
-  const refCurrency = currency || "USD";
 
   try {
     const ai = getGeminiClient();
@@ -585,7 +601,12 @@ Please ensure the tone is professional, objectively financial, and directly anal
     const errMsg = error.message || "";
     const isQuotaExceeded = errMsg.includes("quota") || errMsg.includes("RESOURCE_EXHAUSTED") || errMsg.includes("429") || errMsg.includes("exceeded") || errMsg.includes("exhausted");
 
-    console.warn("Gemini Volatility Analysis live fetch failed:", errMsg.substring(0, 180));
+    if (isQuotaExceeded) {
+      lastQuotaExceededTime = Date.now();
+      console.log("[Gemini API] Quota limit detected. Activating 15-minute global quota-saver mode.");
+    } else {
+      console.log("[Gemini API] Volatility Analysis live fetch bypassed. Reason:", errMsg.substring(0, 180));
+    }
 
     // GRACEFUL FALLBACK: If we have ANY cached analysis (even if expired), return it!
     if (persistentCache.volatility) {
@@ -624,7 +645,21 @@ app.post("/api/ai/dca-advisor", async (req, res) => {
   const cacheKey = `${budget}_${frequency}_${timeHorizon}_${riskProfile}_${currency}`;
   const now = Date.now();
 
-  // 1. Check if we have valid cache for these parameters
+  // 1. Check if we are in Quota Cooldown Mode
+  if (now - lastQuotaExceededTime < QUOTA_COOLDOWN_MS) {
+    console.log("[Gemini API] Quota-saver mode active. Serving offline fallback strategy seamlessly.");
+    const defaultKey = currency === "AUD" ? "100_Weekly_1 Year_Moderate_AUD" : "100_Weekly_1 Year_Moderate_USD";
+    const cachedStrategy = persistentCache.dca[cacheKey] || persistentCache.dca[defaultKey];
+    if (cachedStrategy) {
+      return res.json({
+        strategy: cachedStrategy.strategy,
+        isFallback: true,
+        isQuotaExceeded: true
+      });
+    }
+  }
+
+  // 2. Check if we have valid cache for these parameters
   const cached = persistentCache.dca[cacheKey];
   if (cached && now - cached.timestamp < GEMINI_CACHE_TTL_MS) {
     return res.json({ strategy: cached.strategy });
@@ -678,7 +713,12 @@ Write output using cleanly formatted HTML tags (like <h3>, <p>, <strong>, and li
     const errMsg = error.message || "";
     const isQuotaExceeded = errMsg.includes("quota") || errMsg.includes("RESOURCE_EXHAUSTED") || errMsg.includes("429") || errMsg.includes("exceeded") || errMsg.includes("exhausted");
 
-    console.warn("Gemini DCA Advisor live fetch failed:", errMsg.substring(0, 180));
+    if (isQuotaExceeded) {
+      lastQuotaExceededTime = Date.now();
+      console.log("[Gemini API] Quota limit detected. Activating 15-minute global quota-saver mode.");
+    } else {
+      console.log("[Gemini API] DCA Advisor live fetch bypassed. Reason:", errMsg.substring(0, 180));
+    }
 
     // GRACEFUL FALLBACK: If we have ANY cached advice for these parameters (even if expired), return it!
     if (persistentCache.dca[cacheKey]) {
