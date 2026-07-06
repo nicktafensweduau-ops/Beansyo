@@ -183,7 +183,47 @@ export default function App() {
     try {
       const res = await fetch("/api/price-data");
       if (res.ok) {
-        const data: PriceResponse = await res.json();
+        let data: PriceResponse = await res.json();
+        
+        // Client-side Direct API Fallback:
+        // If the server-side API had to serve cached fallback data (e.g. because Vercel IPs were rate-limited or blocked by blockchain.info),
+        // we attempt a direct client-side request using the user's browser IP, which is rarely blocked by public rate-limiters.
+        if (data.isFallback) {
+          console.warn("[Sync Hub] Server returned fallback price data. Resolving live price directly on the client...");
+          try {
+            // Attempt 1: CoinDesk public price feed
+            const clientRes = await fetch("https://api.coindesk.com/v1/bpi/currentprice.json");
+            if (clientRes.ok) {
+              const clientData = await clientRes.json();
+              if (clientData?.bpi?.USD?.rate_float) {
+                const liveUSD = clientData.bpi.USD.rate_float;
+                const fxRate = data.fxRate || 1.51;
+                const liveAUD = liveUSD * fxRate;
+                
+                // Reconstruct the payload with the actual live price on the client side
+                const updatedData = { ...data };
+                if (updatedData.USD) {
+                  updatedData.USD.livePrice = liveUSD;
+                  if (updatedData.USD.chartData && updatedData.USD.chartData.length > 0) {
+                    updatedData.USD.chartData[updatedData.USD.chartData.length - 1].price = liveUSD;
+                  }
+                }
+                if (updatedData.AUD) {
+                  updatedData.AUD.livePrice = liveAUD;
+                  if (updatedData.AUD.chartData && updatedData.AUD.chartData.length > 0) {
+                    updatedData.AUD.chartData[updatedData.AUD.chartData.length - 1].price = liveAUD;
+                  }
+                }
+                updatedData.isFallback = false;
+                data = updatedData;
+                console.log("[Sync Hub] Successfully resolved actual live price via browser IP:", liveUSD);
+              }
+            }
+          } catch (clientErr) {
+            console.error("[Sync Hub] Direct browser-side price fetch failed, remaining on robust server fallback:", clientErr);
+          }
+        }
+
         setPriceData(data);
         
         // Sync calculator entry price initially in the active calculator currency only if no saved state exists

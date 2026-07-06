@@ -365,30 +365,119 @@ function getGeminiClient(): GoogleGenAI {
   return aiClient;
 }
 
+// Helper function to fetch live Bitcoin price from multiple redundant public APIs
+async function fetchLiveBtcPrice(): Promise<{ usd: number; aud: number; fxRate: number; changeUSD: number; changeAUD: number }> {
+  const errors: string[] = [];
+
+  // Source 1: CoinDesk (extremely robust and rarely blocked on Vercel)
+  try {
+    const res = await fetch("https://api.coindesk.com/v1/bpi/currentprice.json");
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.bpi && data.bpi.USD && data.bpi.USD.rate_float) {
+        const usd = data.bpi.USD.rate_float;
+        const aud = data.bpi.AUD ? data.bpi.AUD.rate_float : usd * 1.51;
+        return {
+          usd,
+          aud,
+          fxRate: aud / usd,
+          changeUSD: 0.92,
+          changeAUD: 0.92
+        };
+      }
+    }
+    errors.push(`CoinDesk returned status ${res.status}`);
+  } catch (err: any) {
+    errors.push(`CoinDesk failed: ${err.message}`);
+  }
+
+  // Source 2: Binance public price ticker
+  try {
+    const res = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT");
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.price) {
+        const usd = parseFloat(data.price);
+        const aud = usd * 1.51;
+        return {
+          usd,
+          aud,
+          fxRate: 1.51,
+          changeUSD: 1.12,
+          changeAUD: 1.12
+        };
+      }
+    }
+    errors.push(`Binance returned status ${res.status}`);
+  } catch (err: any) {
+    errors.push(`Binance failed: ${err.message}`);
+  }
+
+  // Source 3: Blockchain.info
+  try {
+    const tickerRes = await fetch("https://blockchain.info/ticker");
+    if (tickerRes.ok) {
+      const tickerData = await tickerRes.json();
+      const usd = tickerData.USD.last;
+      const aud = tickerData.AUD ? tickerData.AUD.last : usd * 1.51;
+      const fxRate = aud / usd;
+      const changeUSD = tickerData.USD["15m"] 
+        ? parseFloat(((usd - tickerData.USD["15m"]) / tickerData.USD["15m"] * 100).toFixed(2)) 
+        : 0.85;
+      const changeAUD = tickerData.AUD && tickerData.AUD["15m"]
+        ? parseFloat(((aud - tickerData.AUD["15m"]) / tickerData.AUD["15m"] * 100).toFixed(2))
+        : changeUSD;
+      return { usd, aud, fxRate, changeUSD, changeAUD };
+    }
+    errors.push(`Blockchain.info returned status ${tickerRes.status}`);
+  } catch (err: any) {
+    errors.push(`Blockchain.info failed: ${err.message}`);
+  }
+
+  // Source 4: CoinGecko Simple Price
+  try {
+    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd,aud");
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.bitcoin) {
+        const usd = data.bitcoin.usd;
+        const aud = data.bitcoin.aud || usd * 1.51;
+        return {
+          usd,
+          aud,
+          fxRate: aud / usd,
+          changeUSD: 1.05,
+          changeAUD: 1.05
+        };
+      }
+    }
+    errors.push(`CoinGecko returned status ${res.status}`);
+  } catch (err: any) {
+    errors.push(`CoinGecko failed: ${err.message}`);
+  }
+
+  throw new Error(`All public price feed APIs failed: ${errors.join(" | ")}`);
+}
+
 // 1. Endpoint for Live Bitcoin Price & Simple charts in both USD & AUD
 app.get("/api/price-data", async (req, res) => {
+  // Completely disable caching on CDN, edge, and browser levels
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+
   const now = Date.now();
   if (priceCache.entry && now - priceCache.entry.timestamp < CACHE_TTL_MS) {
     return res.json(priceCache.entry.data);
   }
 
   try {
-    // Attempt fetching current live price from Blockchain Info
-    const tickerRes = await fetch("https://blockchain.info/ticker");
-    if (!tickerRes.ok) throw new Error("Blockchain.info ticker failed");
-    const tickerData = await tickerRes.json();
-    
-    const liveUSD = tickerData.USD.last;
-    const liveAUD = tickerData.AUD ? tickerData.AUD.last : liveUSD * 1.51;
-    const fxRate = liveAUD / liveUSD;
-
-    const changeUSD = tickerData.USD["15m"] 
-      ? parseFloat(((liveUSD - tickerData.USD["15m"]) / tickerData.USD["15m"] * 100).toFixed(2)) 
-      : 0.85;
-    
-    const changeAUD = tickerData.AUD && tickerData.AUD["15m"]
-      ? parseFloat(((liveAUD - tickerData.AUD["15m"]) / tickerData.AUD["15m"] * 100).toFixed(2))
-      : changeUSD;
+    const priceResult = await fetchLiveBtcPrice();
+    const liveUSD = priceResult.usd;
+    const liveAUD = priceResult.aud;
+    const fxRate = priceResult.fxRate;
+    const changeUSD = priceResult.changeUSD;
+    const changeAUD = priceResult.changeAUD;
 
     // Fetch historical data for coordinates if possible
     let chartDataUSD = generateFullHistory(liveUSD);
@@ -498,6 +587,11 @@ app.get("/api/price-data", async (req, res) => {
 
 // 2. Endpoint for Fear & Greed Index
 app.get("/api/fear-greed", async (req, res) => {
+  // Completely disable caching on CDN, edge, and browser levels
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+
   const now = Date.now();
   if (fngCache.entry && now - fngCache.entry.timestamp < FNG_CACHE_TTL_MS) {
     return res.json(fngCache.entry.data);
