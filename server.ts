@@ -268,13 +268,27 @@ function loadOrCreateCache() {
       persistentCache.volatility = {
         "gemini-3.1-flash-lite": {
           analysis: (persistentCache.volatility as any).analysis,
-          timestamp: (persistentCache.volatility as any).timestamp || Date.now()
+          timestamp: Date.now()
         }
       };
     }
 
+    // Refresh all loaded volatility cache timestamps to now so they are valid on startup
+    for (const key of Object.keys(persistentCache.volatility)) {
+      if (persistentCache.volatility[key]) {
+        persistentCache.volatility[key].timestamp = Date.now();
+      }
+    }
+
     if (!persistentCache.dca) {
       persistentCache.dca = {};
+    } else {
+      // Refresh all loaded DCA cache timestamps to now so they are valid on startup
+      for (const key of Object.keys(persistentCache.dca)) {
+        if (persistentCache.dca[key]) {
+          persistentCache.dca[key].timestamp = Date.now();
+        }
+      }
     }
 
     // Check for outdated support levels in any volatility sub-caches
@@ -690,34 +704,45 @@ async function queryDeepSeekViaOpenRouter(prompt: string, systemInstruction: str
 
   console.log("[OpenRouter] Querying DeepSeek via OpenRouter (deepseek/deepseek-chat)...");
 
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://ai.studio/build",
-      "X-Title": "Nexus BTC Analytics"
-    },
-    body: JSON.stringify({
-      model: "deepseek/deepseek-chat",
-      messages: [
-        { role: "system", content: systemInstruction },
-        { role: "user", content: prompt }
-      ],
-      temperature: 0.3
-    })
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 12000); // 12-second abort timeout
 
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`OpenRouter API failed with status ${response.status}: ${errText}`);
-  }
+  try {
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://ai.studio/build",
+        "X-Title": "Nexus BTC Analytics"
+      },
+      body: JSON.stringify({
+        model: "deepseek/deepseek-chat",
+        messages: [
+          { role: "system", content: systemInstruction },
+          { role: "user", content: prompt }
+        ],
+        temperature: 0.3
+      }),
+      signal: controller.signal
+    });
 
-  const data = await response.json();
-  if (data?.choices?.[0]?.message?.content) {
-    return data.choices[0].message.content;
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`OpenRouter API failed with status ${response.status}: ${errText}`);
+    }
+
+    const data = await response.json();
+    if (data?.choices?.[0]?.message?.content) {
+      return data.choices[0].message.content;
+    }
+    throw new Error("No response content returned from OpenRouter.");
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    throw err;
   }
-  throw new Error("No response content returned from OpenRouter.");
 }
 
 // 3. AI News Summary on Volatility Driving Factors (using dynamic AI selection: gemini-3.5-flash, gemini-3.1-flash-lite, or deepseek-v4-flash)
@@ -788,14 +813,28 @@ Please ensure the tone is professional, objectively financial, and directly anal
       const ai = getGeminiClient();
       console.log(`Activating ${engine}. Reference price is currently ${refPrice} ${refCurrency}...`);
       
-      const response = await ai.models.generateContent({
-        model: engine,
-        contents: prompt + "\n\nPlease perform a live web search to back up this report with the most recent info.",
-        config: {
-          systemInstruction,
-          tools: [{ googleSearch: {} }],
-        },
-      });
+      let response;
+      try {
+        // Try calling Gemini with Google Search tool grounding
+        response = await ai.models.generateContent({
+          model: engine,
+          contents: prompt + "\n\nPlease perform a live web search to back up this report with the most recent info.",
+          config: {
+            systemInstruction,
+            tools: [{ googleSearch: {} }],
+          },
+        });
+      } catch (searchErr: any) {
+        console.warn(`[Gemini API] Search tool call failed for ${engine}, retrying without search grounding... Error:`, searchErr.message);
+        // Fallback retry without search grounding
+        response = await ai.models.generateContent({
+          model: engine,
+          contents: prompt + "\n\nProvide the analysis directly using your current knowledge.",
+          config: {
+            systemInstruction,
+          },
+        });
+      }
       finalReport = response.text || "<p>Analysis currently unavailable.</p>";
     }
 
@@ -823,17 +862,6 @@ Please ensure the tone is professional, objectively financial, and directly anal
 
     // GRACEFUL FALLBACK: If we have ANY cached analysis for this engine (even if expired), return it!
     const fallbackEntry = (persistentCache.volatility as any)[engine] || (persistentCache.volatility as any)["gemini-3.1-flash-lite"];
-    if (fallbackEntry) {
-      console.log(`Serving cached volatility analysis for ${engine} from disk as offline fallback.`);
-      return res.json({
-        analysis: fallbackEntry.analysis,
-        isFallback: true,
-        isQuotaExceeded,
-        modelUsed: `${engine} (Offline Fallback)`
-      });
-    }
-
-    // Double-fallback to static fallback
     const defaultFallback = `<h3>Live Financial Summary (Offline Fallback)</h3>
     <p><strong>Note:</strong> Live AI query limits reached. Displaying pre-seeded strategic context aligned with prices below $60k:</p>
     <ul>
@@ -841,8 +869,22 @@ Please ensure the tone is professional, objectively financial, and directly anal
       <li><strong>Macro Policy:</strong> High interest rates are maintained longer as central banks digest recent inflation prints.</li>
       <li><strong>Technical Levels:</strong> Major resistance has formed around $59,500 – $61,000 USD, while robust historical support holds near $52,000 – $54,500 USD.</li>
     </ul>`;
+
+    const finalFallbackReport = fallbackEntry ? fallbackEntry.analysis : defaultFallback;
+
+    // Cache the served fallback under this engine to avoid any further live queries for the TTL duration
+    try {
+      (persistentCache.volatility as any)[engine] = {
+        analysis: finalFallbackReport,
+        timestamp: Date.now()
+      };
+      saveCacheToDisk();
+    } catch (cacheWriteErr) {
+      console.error("Failed to write fallback to volatility cache:", cacheWriteErr);
+    }
+
     return res.json({
-      analysis: defaultFallback,
+      analysis: finalFallbackReport,
       isFallback: true,
       isQuotaExceeded,
       modelUsed: `${engine} (Offline Fallback)`
@@ -914,14 +956,28 @@ Write output using cleanly formatted HTML tags (like <h3>, <p>, <strong>, and li
     } else {
       const ai = getGeminiClient();
       console.log(`Activating ${engine} to scrape & filter DCA macro conditions...`);
-      const response = await ai.models.generateContent({
-        model: engine,
-        contents: prompt + "\n\nPlease also perform a live web search for institutional Bitcoin sentiments, BlackRock & Fidelity Spot ETF inflows/outflows, and upcoming macro inflation markers.",
-        config: {
-          systemInstruction,
-          tools: [{ googleSearch: {} }],
-        },
-      });
+      let response;
+      try {
+        // Try calling Gemini with Google Search tool grounding
+        response = await ai.models.generateContent({
+          model: engine,
+          contents: prompt + "\n\nPlease also perform a live web search for institutional Bitcoin sentiments, BlackRock & Fidelity Spot ETF inflows/outflows, and upcoming macro inflation markers.",
+          config: {
+            systemInstruction,
+            tools: [{ googleSearch: {} }],
+          },
+        });
+      } catch (searchErr: any) {
+        console.warn(`[Gemini API] Search tool call failed for DCA advisor on ${engine}, retrying without search grounding... Error:`, searchErr.message);
+        // Fallback retry without search grounding
+        response = await ai.models.generateContent({
+          model: engine,
+          contents: prompt + "\n\nProvide the DCA recommendation directly using your current knowledge.",
+          config: {
+            systemInstruction,
+          },
+        });
+      }
       finalStrategy = response.text || "<p>Blueprint currently unavailable.</p>";
     }
 
@@ -954,20 +1010,25 @@ Write output using cleanly formatted HTML tags (like <h3>, <p>, <strong>, and li
                            persistentCache.dca[fallbackDefaultKey] ||
                            persistentCache.dca[oldDefaultKey];
 
-    if (cachedStrategy) {
-      console.log("Serving cached strategy as offline fallback.");
-      return res.json({
-        strategy: cachedStrategy.strategy,
-        isFallback: true,
-        isQuotaExceeded
-      });
-    }
-
     // Absolute fallback
     const fallbackDca = `<h3>Tactical Allocation Blueprint (Offline Fallback)</h3>
     <p><strong>Note:</strong> Active live AI consultation limits reached. Fallback recommendation: Allocate your regular budget of ${currencyChar}${budget} every ${frequency}. Adjust and buy more aggressively if Fear & Greed index enters below 30.</p>`;
+
+    const finalFallbackStrategy = cachedStrategy ? cachedStrategy.strategy : fallbackDca;
+
+    // Cache the served fallback under this cacheKey to avoid any further live queries for the TTL duration
+    try {
+      persistentCache.dca[cacheKey] = {
+        strategy: finalFallbackStrategy,
+        timestamp: Date.now()
+      };
+      saveCacheToDisk();
+    } catch (cacheWriteErr) {
+      console.error("Failed to write fallback to DCA cache:", cacheWriteErr);
+    }
+
     return res.json({
-      strategy: fallbackDca,
+      strategy: finalFallbackStrategy,
       isFallback: true,
       isQuotaExceeded
     });
