@@ -11,6 +11,20 @@ const PORT = 3000;
 
 app.use(express.json());
 
+// Helper to register routes on both /api/path and /path for Vercel routing resilience
+const registerRoute = (routePath: string, handler: any, method: "get" | "post" = "get") => {
+  const apiPath = routePath.startsWith("/api") ? routePath : `/api${routePath}`;
+  const directPath = routePath.startsWith("/api") ? routePath.replace("/api", "") : routePath;
+  
+  if (method === "get") {
+    app.get(apiPath, handler);
+    if (directPath) app.get(directPath, handler);
+  } else if (method === "post") {
+    app.post(apiPath, handler);
+    if (directPath) app.post(directPath, handler);
+  }
+};
+
 // In-memory cache to prevent aggressive external API rate limits
 interface CacheEntry<T> {
   data: T;
@@ -25,7 +39,11 @@ const FNG_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes Fear and Greed validity
 // ----------------------------------------------------
 // Persistent Disk Cache & Pre-seeding Setup
 // ----------------------------------------------------
-const CACHE_FILE = path.join(process.cwd(), "gemini-cache.json");
+const isVercel = !!process.env.VERCEL;
+const DEPLOY_CACHE_FILE = path.join(process.cwd(), "gemini-cache.json");
+const WRITE_CACHE_FILE = isVercel 
+  ? path.join("/tmp", "gemini-cache.json")
+  : DEPLOY_CACHE_FILE;
 const GEMINI_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
 interface PersistentCache {
@@ -49,11 +67,30 @@ const QUOTA_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes cooldown period
 
 function loadOrCreateCache() {
   try {
-    if (fs.existsSync(CACHE_FILE)) {
-      const data = fs.readFileSync(CACHE_FILE, "utf-8");
+    if (fs.existsSync(WRITE_CACHE_FILE)) {
+      const data = fs.readFileSync(WRITE_CACHE_FILE, "utf-8");
       persistentCache = JSON.parse(data);
-      console.log("Persistent Gemini cache loaded from disk.");
+      console.log("Persistent Gemini cache loaded from writable path:", WRITE_CACHE_FILE);
       
+      // Auto-invalidate outdated cache if it lists the old $63,500 support range
+      if (persistentCache.volatility && persistentCache.volatility.analysis.includes("$63,500")) {
+        console.log("Outdated $63,500 support level detected in cache. Resetting volatility cache for live regeneration...");
+        persistentCache.volatility = null;
+      }
+    } else if (fs.existsSync(DEPLOY_CACHE_FILE)) {
+      const data = fs.readFileSync(DEPLOY_CACHE_FILE, "utf-8");
+      persistentCache = JSON.parse(data);
+      console.log("Persistent Gemini cache loaded from deployment path:", DEPLOY_CACHE_FILE);
+      
+      if (isVercel) {
+        try {
+          fs.writeFileSync(WRITE_CACHE_FILE, JSON.stringify(persistentCache, null, 2), "utf-8");
+          console.log("Copied pre-seeded cache to writable path:", WRITE_CACHE_FILE);
+        } catch (copyErr) {
+          console.warn("Could not copy cache to /tmp:", copyErr);
+        }
+      }
+
       // Auto-invalidate outdated cache if it lists the old $63,500 support range
       if (persistentCache.volatility && persistentCache.volatility.analysis.includes("$63,500")) {
         console.log("Outdated $63,500 support level detected in cache. Resetting volatility cache for live regeneration...");
@@ -229,7 +266,7 @@ function loadOrCreateCache() {
           }
         }
       };
-      fs.writeFileSync(CACHE_FILE, JSON.stringify(persistentCache, null, 2), "utf-8");
+      fs.writeFileSync(WRITE_CACHE_FILE, JSON.stringify(persistentCache, null, 2), "utf-8");
       console.log("Pre-seeded persistent Gemini cache created on disk.");
     }
   } catch (err) {
@@ -239,8 +276,8 @@ function loadOrCreateCache() {
 
 function saveCacheToDisk() {
   try {
-    fs.writeFileSync(CACHE_FILE, JSON.stringify(persistentCache, null, 2), "utf-8");
-    console.log("Persistent Gemini cache written to disk.");
+    fs.writeFileSync(WRITE_CACHE_FILE, JSON.stringify(persistentCache, null, 2), "utf-8");
+    console.log("Persistent Gemini cache written to disk at:", WRITE_CACHE_FILE);
   } catch (err) {
     console.error("Failed to save Gemini cache to disk:", err);
   }
@@ -460,7 +497,7 @@ async function fetchLiveBtcPrice(): Promise<{ usd: number; aud: number; fxRate: 
 }
 
 // 1. Endpoint for Live Bitcoin Price & Simple charts in both USD & AUD
-app.get("/api/price-data", async (req, res) => {
+registerRoute("/price-data", async (req, res) => {
   // Completely disable caching on CDN, edge, and browser levels
   res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
   res.setHeader("Pragma", "no-cache");
@@ -586,7 +623,7 @@ app.get("/api/price-data", async (req, res) => {
 });
 
 // 2. Endpoint for Fear & Greed Index
-app.get("/api/fear-greed", async (req, res) => {
+registerRoute("/fear-greed", async (req, res) => {
   // Completely disable caching on CDN, edge, and browser levels
   res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
   res.setHeader("Pragma", "no-cache");
@@ -624,7 +661,7 @@ app.get("/api/fear-greed", async (req, res) => {
 });
 
 // 3. AI News Summary on Volatility Driving Factors (using Two-Tier Architecture: 3.1 Flash-Lite + 3.5 Flash)
-app.post("/api/ai/volatility-analysis", async (req, res) => {
+registerRoute("/ai/volatility-analysis", async (req, res) => {
   const now = Date.now();
 
   const { currentPrice, currency } = req.body || {};
@@ -728,10 +765,10 @@ Please ensure the tone is professional, objectively financial, and directly anal
       modelUsed: "gemini-3.1-flash-lite (Offline Fallback)"
     });
   }
-});
+}, "post");
 
 // 4. AI Dollar Cost Average suggestion Agent (using single-call free-tier gemini-3.1-flash-lite with googleSearch)
-app.post("/api/ai/dca-advisor", async (req, res) => {
+registerRoute("/ai/dca-advisor", async (req, res) => {
   const { budget, frequency, timeHorizon, riskProfile, currentPrice, currency } = req.body;
   const currencySymbol = currency === "AUD" ? "AUD" : "USD";
   const currencyChar = currency === "AUD" ? "A$" : "$";
@@ -844,7 +881,7 @@ Write output using cleanly formatted HTML tags (like <h3>, <p>, <strong>, and li
       isQuotaExceeded
     });
   }
-});
+}, "post");
 
 // Serves the client SPA files
 async function startServer() {
