@@ -106,6 +106,15 @@ export default function App() {
     return localStorage.getItem("btc_calc_imported_volatility_model") || "gemini-3.1-flash-lite";
   });
 
+  // Active AI Engine state (remembers choice in localStorage)
+  const [aiEngine, setAiEngine] = useState<"gemini-3.5-flash" | "gemini-3.1-flash-lite" | "deepseek-v4-flash">(() => {
+    const saved = localStorage.getItem("btc_calc_ai_engine");
+    if (saved === "gemini-3.5-flash" || saved === "gemini-3.1-flash-lite" || saved === "deepseek-v4-flash") {
+      return saved;
+    }
+    return "gemini-3.1-flash-lite";
+  });
+
   // Gemini API Quota detection state
   const [quotaExceeded, setQuotaExceeded] = useState<boolean>(false);
 
@@ -433,7 +442,8 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           currentPrice: liveRatePrice,
-          currency: currency
+          currency: currency,
+          engine: aiEngine
         })
       });
       if (!res.ok) {
@@ -649,8 +659,13 @@ export default function App() {
   useEffect(() => {
     fetchPriceData();
     fetchFearGreed();
-    fetchVolatilityAnalysis();
   }, []);
+
+  // Trigger AI refresh when the engine changes or on mount
+  useEffect(() => {
+    fetchVolatilityAnalysis();
+    localStorage.setItem("btc_calc_ai_engine", aiEngine);
+  }, [aiEngine]);
 
   // Sync pricing updates on interval to be truly "Live"
   useEffect(() => {
@@ -1260,6 +1275,28 @@ export default function App() {
               <p className="text-xs text-slate-400 mb-4 leading-relaxed">
                 Live AI synthesis searching current market status, macroeconomics trends, ETF flow reports, inflation benchmarks, and sentiment indices.
               </p>
+
+              {/* AI Engine Switcher Segmented Control */}
+              <div className="mb-4">
+                <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">
+                  Select AI Analysis Engine
+                </span>
+                <div className="bg-slate-950 border border-slate-800 p-1 rounded-xl flex items-center gap-1">
+                  {(["gemini-3.5-flash", "gemini-3.1-flash-lite", "deepseek-v4-flash"] as const).map((eng) => (
+                    <button
+                      key={eng}
+                      onClick={() => setAiEngine(eng)}
+                      className={`flex-1 text-center py-1 text-[10px] font-extrabold rounded-lg cursor-pointer transition ${
+                        aiEngine === eng
+                          ? "bg-blue-500 text-white shadow font-black"
+                          : "text-slate-400 hover:text-white hover:bg-slate-900/50"
+                      }`}
+                    >
+                      {eng === "gemini-3.5-flash" ? "Gemini 3.5" : eng === "gemini-3.1-flash-lite" ? "Gemini 3.1 Lite" : "DeepSeek V4"}
+                    </button>
+                  ))}
+                </div>
+              </div>
 
               {loadingVolatility ? (
                 <div className="flex-1 flex flex-col items-center justify-center space-y-3 py-12">
