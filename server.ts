@@ -50,7 +50,10 @@ interface PersistentCache {
   volatility: {
     analysis: string;
     timestamp: number;
-  } | null;
+  } | Record<string, {
+    analysis: string;
+    timestamp: number;
+  }> | null;
   dca: Record<string, {
     strategy: string;
     timestamp: number;
@@ -72,10 +75,27 @@ function loadOrCreateCache() {
       persistentCache = JSON.parse(data);
       console.log("Persistent Gemini cache loaded from writable path:", WRITE_CACHE_FILE);
       
-      // Auto-invalidate outdated cache if it lists the old $63,500 support range
-      if (persistentCache.volatility && persistentCache.volatility.analysis.includes("$63,500")) {
-        console.log("Outdated $63,500 support level detected in cache. Resetting volatility cache for live regeneration...");
-        persistentCache.volatility = null;
+      // Auto-invalidate outdated cache if it lists the old $63,500 support range safely
+      if (persistentCache.volatility) {
+        let hasOutdated = false;
+        const vol = persistentCache.volatility as any;
+        if (typeof vol.analysis === "string") {
+          if (vol.analysis.includes("$63,500")) {
+            hasOutdated = true;
+          }
+        } else {
+          for (const key of Object.keys(vol)) {
+            const entry = vol[key];
+            if (entry && typeof entry.analysis === "string" && entry.analysis.includes("$63,500")) {
+              hasOutdated = true;
+              break;
+            }
+          }
+        }
+        if (hasOutdated) {
+          console.log("Outdated $63,500 support level detected in cache. Resetting volatility cache for live regeneration...");
+          persistentCache.volatility = null;
+        }
       }
     } else if (fs.existsSync(DEPLOY_CACHE_FILE)) {
       const data = fs.readFileSync(DEPLOY_CACHE_FILE, "utf-8");
@@ -91,10 +111,27 @@ function loadOrCreateCache() {
         }
       }
 
-      // Auto-invalidate outdated cache if it lists the old $63,500 support range
-      if (persistentCache.volatility && persistentCache.volatility.analysis.includes("$63,500")) {
-        console.log("Outdated $63,500 support level detected in cache. Resetting volatility cache for live regeneration...");
-        persistentCache.volatility = null;
+      // Auto-invalidate outdated cache if it lists the old $63,500 support range safely
+      if (persistentCache.volatility) {
+        let hasOutdated = false;
+        const vol = persistentCache.volatility as any;
+        if (typeof vol.analysis === "string") {
+          if (vol.analysis.includes("$63,500")) {
+            hasOutdated = true;
+          }
+        } else {
+          for (const key of Object.keys(vol)) {
+            const entry = vol[key];
+            if (entry && typeof entry.analysis === "string" && entry.analysis.includes("$63,500")) {
+              hasOutdated = true;
+              break;
+            }
+          }
+        }
+        if (hasOutdated) {
+          console.log("Outdated $63,500 support level detected in cache. Resetting volatility cache for live regeneration...");
+          persistentCache.volatility = null;
+        }
       }
     } else {
       // Pre-seed with polished mock metrics/DCA playbooks to prevent ANY initial API quota consumption
@@ -660,65 +697,126 @@ registerRoute("/fear-greed", async (req, res) => {
   }
 });
 
-// 3. AI News Summary on Volatility Driving Factors (using Two-Tier Architecture: 3.1 Flash-Lite + 3.5 Flash)
+// Helper function to query DeepSeek via OpenRouter API using the user-provided or env key
+async function queryDeepSeekViaOpenRouter(prompt: string, systemInstruction: string): Promise<string> {
+  const apiKey = process.env.OPENROUTER_API_KEY || "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";
+  if (!apiKey) {
+    throw new Error("OpenRouter API key is missing.");
+  }
+
+  console.log("[OpenRouter] Querying DeepSeek via OpenRouter (deepseek/deepseek-chat)...");
+
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": "https://ai.studio/build",
+      "X-Title": "Nexus BTC Analytics"
+    },
+    body: JSON.stringify({
+      model: "deepseek/deepseek-chat",
+      messages: [
+        { role: "system", content: systemInstruction },
+        { role: "user", content: prompt }
+      ],
+      temperature: 0.3
+    })
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`OpenRouter API failed with status ${response.status}: ${errText}`);
+  }
+
+  const data = await response.json();
+  if (data?.choices?.[0]?.message?.content) {
+    return data.choices[0].message.content;
+  }
+  throw new Error("No response content returned from OpenRouter.");
+}
+
+// 3. AI News Summary on Volatility Driving Factors (using dynamic AI selection: gemini-3.5-flash, gemini-3.1-flash-lite, or deepseek-v4-flash)
 registerRoute("/ai/volatility-analysis", async (req, res) => {
   const now = Date.now();
 
-  const { currentPrice, currency } = req.body || {};
+  const { currentPrice, currency, engine = "gemini-3.1-flash-lite" } = req.body || {};
   const refPrice = currentPrice ? Math.round(currentPrice) : 58300;
   const refCurrency = currency || "USD";
 
-  // 1. Check if we are in Quota Cooldown Mode
-  if (now - lastQuotaExceededTime < QUOTA_COOLDOWN_MS) {
+  // Normalize persistentCache.volatility to support engine keys
+  let volCache = persistentCache.volatility as any;
+  if (volCache && "analysis" in volCache) {
+    // Migrate old structure to engine-indexed
+    persistentCache.volatility = {
+      "gemini-3.1-flash-lite": {
+        analysis: volCache.analysis,
+        timestamp: volCache.timestamp
+      }
+    } as any;
+  }
+  if (!persistentCache.volatility) {
+    persistentCache.volatility = {} as any;
+  }
+
+  const isGemini = engine.startsWith("gemini");
+
+  // 1. Check if we are in Quota Cooldown Mode (only applies to Gemini models)
+  if (isGemini && now - lastQuotaExceededTime < QUOTA_COOLDOWN_MS) {
     console.log("[Gemini API] Quota-saver mode active. Serving offline fallback volatility analysis seamlessly.");
-    if (persistentCache.volatility) {
+    const cachedEntry = (persistentCache.volatility as any)[engine] || (persistentCache.volatility as any)["gemini-3.1-flash-lite"];
+    if (cachedEntry) {
       return res.json({
-        analysis: persistentCache.volatility.analysis,
+        analysis: cachedEntry.analysis,
         isFallback: true,
         isQuotaExceeded: true,
-        modelUsed: "gemini-3.1-flash-lite (Offline Fallback)"
+        modelUsed: `${engine} (Offline Fallback)`
       });
     }
   }
   
-  // 2. Check if we have valid cache
-  if (persistentCache.volatility && now - persistentCache.volatility.timestamp < GEMINI_CACHE_TTL_MS) {
+  // 2. Check if we have valid cache for this engine
+  const cachedEntry = (persistentCache.volatility as any)[engine];
+  if (cachedEntry && now - cachedEntry.timestamp < GEMINI_CACHE_TTL_MS) {
     return res.json({ 
-      analysis: persistentCache.volatility.analysis,
-      modelUsed: "gemini-3.1-flash-lite (Cached)"
+      analysis: cachedEntry.analysis,
+      modelUsed: `${engine} (Cached)`
     });
   }
 
   try {
-    const ai = getGeminiClient();
+    let finalReport = "";
 
-    // ==========================================
-    // CONSOLIDATED FREE TIER GROUNDED MODEL (gemini-3.1-flash-lite)
-    // ==========================================
-    console.log(`Activating gemini-3.1-flash-lite. Reference price is currently ${refPrice} ${refCurrency}...`);
-    const prompt = `Perform a live web search for recent Bitcoin price volatility, Spot ETF flows, and macroeconomic interest rate/CPI decisions.
-The current Bitcoin price is around ${refPrice} ${refCurrency} (which is clearly below $60,000 USD). Ground all of your search and structural level extraction in this current sub-$60k price context. Set realistic support levels (e.g., $52,000 – $55,000) and resistance levels (e.g., $59,500 – $61,000).
+    const systemInstruction = "You are an elite quantitative portfolio manager and cryptofinance analyst. Formulate deep, highly accurate, and formatted HTML cryptofinance volatility reports.";
+    const prompt = `Perform a deep cryptofinance analysis of recent Bitcoin price volatility, Spot ETF flows, and macroeconomic interest rate/CPI decisions.
+The current Bitcoin price is around ${refPrice} ${refCurrency} (which is clearly below $60,000 USD). Ground all of your structural level extraction in this current sub-$60k price context. Set realistic support levels (e.g., $52,000 – $55,000) and resistance levels (e.g., $59,500 – $61,000).
 
 Structure your final report into the following exact sections using clean HTML tags (like <h3>, <p>, <ul>, <li>, etc.):
-1. "Core Driving Factors": Detail what is causing price fluctuations right now based on the live search data.
+1. "Core Driving Factors": Detail what is causing price fluctuations right now.
 2. "Macroeconomic Context": Highlight recent central bank rates, inflation reports, or currency fluctuations.
 3. "Technical Trends & Outlook": Assess support heights, resistance thresholds, and key price levels.
 
 Please ensure the tone is professional, objectively financial, and directly analytical. Avoid vague buzzwords or informal phrasing.`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.1-flash-lite",
-      contents: prompt,
-      config: {
-        systemInstruction: "You are an elite quantitative portfolio manager and cryptofinance analyst. Perform live web search to formulate deep, highly accurate, and formatted HTML cryptofinance volatility reports.",
-        tools: [{ googleSearch: {} }],
-      },
-    });
+    if (engine === "deepseek-v4-flash") {
+      finalReport = await queryDeepSeekViaOpenRouter(prompt, systemInstruction);
+    } else {
+      const ai = getGeminiClient();
+      console.log(`Activating ${engine}. Reference price is currently ${refPrice} ${refCurrency}...`);
+      
+      const response = await ai.models.generateContent({
+        model: engine,
+        contents: prompt + "\n\nPlease perform a live web search to back up this report with the most recent info.",
+        config: {
+          systemInstruction,
+          tools: [{ googleSearch: {} }],
+        },
+      });
+      finalReport = response.text || "<p>Analysis currently unavailable.</p>";
+    }
 
-    const finalReport = response.text || "<p>Analysis currently unavailable.</p>";
-    
     // Save to persistent cache and disk
-    persistentCache.volatility = {
+    (persistentCache.volatility as any)[engine] = {
       analysis: finalReport,
       timestamp: now
     };
@@ -726,27 +824,28 @@ Please ensure the tone is professional, objectively financial, and directly anal
 
     return res.json({ 
       analysis: finalReport,
-      modelUsed: "gemini-3.1-flash-lite"
+      modelUsed: engine
     });
   } catch (error: any) {
     const errMsg = error.message || "";
     const isQuotaExceeded = errMsg.includes("quota") || errMsg.includes("RESOURCE_EXHAUSTED") || errMsg.includes("429") || errMsg.includes("exceeded") || errMsg.includes("exhausted");
 
-    if (isQuotaExceeded) {
+    if (isQuotaExceeded && isGemini) {
       lastQuotaExceededTime = Date.now();
       console.log("[Gemini API] Quota limit detected. Activating 15-minute global quota-saver mode.");
     } else {
-      console.log("[Gemini API] Volatility Analysis live fetch bypassed. Reason:", errMsg.substring(0, 180));
+      console.log(`[AI API] Volatility Analysis fetch bypassed. Engine: ${engine}. Reason:`, errMsg.substring(0, 180));
     }
 
-    // GRACEFUL FALLBACK: If we have ANY cached analysis (even if expired), return it!
-    if (persistentCache.volatility) {
-      console.log("Serving cached volatility analysis from disk as high-fidelity offline fallback.");
+    // GRACEFUL FALLBACK: If we have ANY cached analysis for this engine (even if expired), return it!
+    const fallbackEntry = (persistentCache.volatility as any)[engine] || (persistentCache.volatility as any)["gemini-3.1-flash-lite"];
+    if (fallbackEntry) {
+      console.log(`Serving cached volatility analysis for ${engine} from disk as offline fallback.`);
       return res.json({
-        analysis: persistentCache.volatility.analysis,
+        analysis: fallbackEntry.analysis,
         isFallback: true,
         isQuotaExceeded,
-        modelUsed: "gemini-3.1-flash-lite (Offline Fallback)"
+        modelUsed: `${engine} (Offline Fallback)`
       });
     }
 
@@ -762,25 +861,34 @@ Please ensure the tone is professional, objectively financial, and directly anal
       analysis: defaultFallback,
       isFallback: true,
       isQuotaExceeded,
-      modelUsed: "gemini-3.1-flash-lite (Offline Fallback)"
+      modelUsed: `${engine} (Offline Fallback)`
     });
   }
 }, "post");
 
-// 4. AI Dollar Cost Average suggestion Agent (using single-call free-tier gemini-3.1-flash-lite with googleSearch)
+// 4. AI Dollar Cost Average suggestion Agent (using dynamic AI selection: gemini-3.5-flash, gemini-3.1-flash-lite, or deepseek-v4-flash)
 registerRoute("/ai/dca-advisor", async (req, res) => {
-  const { budget, frequency, timeHorizon, riskProfile, currentPrice, currency } = req.body;
+  const { budget, frequency, timeHorizon, riskProfile, currentPrice, currency, engine = "gemini-3.1-flash-lite" } = req.body || {};
   const currencySymbol = currency === "AUD" ? "AUD" : "USD";
   const currencyChar = currency === "AUD" ? "A$" : "$";
 
-  const cacheKey = `${budget}_${frequency}_${timeHorizon}_${riskProfile}_${currency}`;
+  const cacheKey = `${engine}_${budget || 100}_${frequency || "Weekly"}_${timeHorizon || "1 Year"}_${riskProfile || "Moderate"}_${currency || "USD"}`;
   const now = Date.now();
 
-  // 1. Check if we are in Quota Cooldown Mode
-  if (now - lastQuotaExceededTime < QUOTA_COOLDOWN_MS) {
+  const isGemini = engine.startsWith("gemini");
+
+  // 1. Check if we are in Quota Cooldown Mode (only applies to Gemini models)
+  if (isGemini && now - lastQuotaExceededTime < QUOTA_COOLDOWN_MS) {
     console.log("[Gemini API] Quota-saver mode active. Serving offline fallback strategy seamlessly.");
-    const defaultKey = currency === "AUD" ? "100_Weekly_1 Year_Moderate_AUD" : "100_Weekly_1 Year_Moderate_USD";
-    const cachedStrategy = persistentCache.dca[cacheKey] || persistentCache.dca[defaultKey];
+    const defaultKey = currency === "AUD" ? `${engine}_100_Weekly_1 Year_Moderate_AUD` : `${engine}_100_Weekly_1 Year_Moderate_USD`;
+    const fallbackDefaultKey = currency === "AUD" ? "gemini-3.1-flash-lite_100_Weekly_1 Year_Moderate_AUD" : "gemini-3.1-flash-lite_100_Weekly_1 Year_Moderate_USD";
+    const oldDefaultKey = currency === "AUD" ? "100_Weekly_1 Year_Moderate_AUD" : "100_Weekly_1 Year_Moderate_USD";
+
+    const cachedStrategy = persistentCache.dca[cacheKey] || 
+                           persistentCache.dca[defaultKey] || 
+                           persistentCache.dca[fallbackDefaultKey] ||
+                           persistentCache.dca[oldDefaultKey];
+
     if (cachedStrategy) {
       return res.json({
         strategy: cachedStrategy.strategy,
@@ -797,14 +905,10 @@ registerRoute("/ai/dca-advisor", async (req, res) => {
   }
 
   try {
-    const ai = getGeminiClient();
+    let finalStrategy = "";
 
-    // ==========================================
-    // CONSOLIDATED FREE TIER GROUNDED MODEL (gemini-3.1-flash-lite)
-    // ==========================================
-    console.log("Activating gemini-3.1-flash-lite to scrape & filter DCA macro conditions...");
-    const prompt = `Perform a live web search for institutional Bitcoin sentiments, BlackRock & Fidelity Spot ETF inflows/outflows, Grayscale selling pressures, and key upcoming FOMC macroeconomic events.
-Then, formulate a highly customized, safe, and tactical Bitcoin DCA model based on these parameters:
+    const systemInstruction = "You are an elite quantitative cryptofinance analyst. Synthesize institutional flows, macro events, and DCA mathematics into beautifully structured HTML advisor responses.";
+    const prompt = `Formulate a highly customized, safe, and tactical Bitcoin DCA model based on these parameters:
 
 User DCA Parameters:
 - **Periodic Investing Budget:** ${currencyChar}${budget || 100} ${currencySymbol}
@@ -815,22 +919,27 @@ User DCA Parameters:
 
 Provide a highly scannable tactical blueprint containing:
 1. "Strategic DCA Routine": Break down the suggested regular investment and any potential dynamic 'scaling strategies' (e.g., investing 20% more if Fear & Greed Index drops below 30).
-2. "Institutional & Macro Sentiment": Highlight recent Spot ETF net flows, Grayscale dynamics, macro inflation markers, and central bank parameters based on live search results.
+2. "Institutional & Macro Sentiment": Highlight recent Spot ETF net flows, Grayscale dynamics, macro inflation markers, and central bank parameters.
 3. "Upcoming Catalysts & Risks": List upcoming economic events (FOMC meetings, rate cuts, inflation releases) that the user should observe.
 4. "Historic Price Threshold Matrix": Propose price thresholds (e.g. -10%, -20% from local highs) for 'bonus buy' opportunistic allocations.
 
 Write output using cleanly formatted HTML tags (like <h3>, <p>, <strong>, and lists <ul>/<li>) so it aligns elegantly in our modern crypto dashboard interface. Keep it objective, professional, and clear. Ensure you state at the bottom that this is informational research and not financial advice.`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.1-flash-lite",
-      contents: prompt,
-      config: {
-        systemInstruction: "You are an elite quantitative cryptofinance analyst. Perform live web search to synthesize institutional flows, macro events, and DCA mathematics into beautifully structured HTML advisor responses.",
-        tools: [{ googleSearch: {} }],
-      },
-    });
-
-    const finalStrategy = response.text || "<p>Blueprint currently unavailable.</p>";
+    if (engine === "deepseek-v4-flash") {
+      finalStrategy = await queryDeepSeekViaOpenRouter(prompt, systemInstruction);
+    } else {
+      const ai = getGeminiClient();
+      console.log(`Activating ${engine} to scrape & filter DCA macro conditions...`);
+      const response = await ai.models.generateContent({
+        model: engine,
+        contents: prompt + "\n\nPlease also perform a live web search for institutional Bitcoin sentiments, BlackRock & Fidelity Spot ETF inflows/outflows, and upcoming macro inflation markers.",
+        config: {
+          systemInstruction,
+          tools: [{ googleSearch: {} }],
+        },
+      });
+      finalStrategy = response.text || "<p>Blueprint currently unavailable.</p>";
+    }
 
     // Save to persistent cache and disk
     persistentCache.dca[cacheKey] = {
@@ -844,29 +953,27 @@ Write output using cleanly formatted HTML tags (like <h3>, <p>, <strong>, and li
     const errMsg = error.message || "";
     const isQuotaExceeded = errMsg.includes("quota") || errMsg.includes("RESOURCE_EXHAUSTED") || errMsg.includes("429") || errMsg.includes("exceeded") || errMsg.includes("exhausted");
 
-    if (isQuotaExceeded) {
+    if (isQuotaExceeded && isGemini) {
       lastQuotaExceededTime = Date.now();
       console.log("[Gemini API] Quota limit detected. Activating 15-minute global quota-saver mode.");
     } else {
-      console.log("[Gemini API] DCA Advisor live fetch bypassed. Reason:", errMsg.substring(0, 180));
+      console.log(`[AI API] DCA Advisor fetch bypassed. Engine: ${engine}. Reason:`, errMsg.substring(0, 180));
     }
 
     // GRACEFUL FALLBACK: If we have ANY cached advice for these parameters (even if expired), return it!
-    if (persistentCache.dca[cacheKey]) {
-      console.log("Serving cached parameter-matched strategy as offline fallback.");
-      return res.json({
-        strategy: persistentCache.dca[cacheKey].strategy,
-        isFallback: true,
-        isQuotaExceeded
-      });
-    }
+    const defaultKey = currency === "AUD" ? `${engine}_100_Weekly_1 Year_Moderate_AUD` : `${engine}_100_Weekly_1 Year_Moderate_USD`;
+    const fallbackDefaultKey = currency === "AUD" ? "gemini-3.1-flash-lite_100_Weekly_1 Year_Moderate_AUD" : "gemini-3.1-flash-lite_100_Weekly_1 Year_Moderate_USD";
+    const oldDefaultKey = currency === "AUD" ? "100_Weekly_1 Year_Moderate_AUD" : "100_Weekly_1 Year_Moderate_USD";
 
-    // Default to the generic USD/AUD pre-seeded moderate cache if matching custom ones are missing
-    const defaultKey = currency === "AUD" ? "100_Weekly_1 Year_Moderate_AUD" : "100_Weekly_1 Year_Moderate_USD";
-    if (persistentCache.dca[defaultKey]) {
-      console.log("Serving default pre-seeded strategy as offline fallback.");
+    const cachedStrategy = persistentCache.dca[cacheKey] || 
+                           persistentCache.dca[defaultKey] || 
+                           persistentCache.dca[fallbackDefaultKey] ||
+                           persistentCache.dca[oldDefaultKey];
+
+    if (cachedStrategy) {
+      console.log("Serving cached strategy as offline fallback.");
       return res.json({
-        strategy: persistentCache.dca[defaultKey].strategy,
+        strategy: cachedStrategy.strategy,
         isFallback: true,
         isQuotaExceeded
       });
