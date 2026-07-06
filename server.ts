@@ -47,13 +47,10 @@ const WRITE_CACHE_FILE = isVercel
 const GEMINI_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
 interface PersistentCache {
-  volatility: {
+  volatility: Record<string, {
     analysis: string;
     timestamp: number;
-  } | Record<string, {
-    analysis: string;
-    timestamp: number;
-  }> | null;
+  }>;
   dca: Record<string, {
     strategy: string;
     timestamp: number;
@@ -61,7 +58,7 @@ interface PersistentCache {
 }
 
 let persistentCache: PersistentCache = {
-  volatility: null,
+  volatility: {},
   dca: {}
 };
 
@@ -74,29 +71,6 @@ function loadOrCreateCache() {
       const data = fs.readFileSync(WRITE_CACHE_FILE, "utf-8");
       persistentCache = JSON.parse(data);
       console.log("Persistent Gemini cache loaded from writable path:", WRITE_CACHE_FILE);
-      
-      // Auto-invalidate outdated cache if it lists the old $63,500 support range safely
-      if (persistentCache.volatility) {
-        let hasOutdated = false;
-        const vol = persistentCache.volatility as any;
-        if (typeof vol.analysis === "string") {
-          if (vol.analysis.includes("$63,500")) {
-            hasOutdated = true;
-          }
-        } else {
-          for (const key of Object.keys(vol)) {
-            const entry = vol[key];
-            if (entry && typeof entry.analysis === "string" && entry.analysis.includes("$63,500")) {
-              hasOutdated = true;
-              break;
-            }
-          }
-        }
-        if (hasOutdated) {
-          console.log("Outdated $63,500 support level detected in cache. Resetting volatility cache for live regeneration...");
-          persistentCache.volatility = null;
-        }
-      }
     } else if (fs.existsSync(DEPLOY_CACHE_FILE)) {
       const data = fs.readFileSync(DEPLOY_CACHE_FILE, "utf-8");
       persistentCache = JSON.parse(data);
@@ -110,34 +84,12 @@ function loadOrCreateCache() {
           console.warn("Could not copy cache to /tmp:", copyErr);
         }
       }
-
-      // Auto-invalidate outdated cache if it lists the old $63,500 support range safely
-      if (persistentCache.volatility) {
-        let hasOutdated = false;
-        const vol = persistentCache.volatility as any;
-        if (typeof vol.analysis === "string") {
-          if (vol.analysis.includes("$63,500")) {
-            hasOutdated = true;
-          }
-        } else {
-          for (const key of Object.keys(vol)) {
-            const entry = vol[key];
-            if (entry && typeof entry.analysis === "string" && entry.analysis.includes("$63,500")) {
-              hasOutdated = true;
-              break;
-            }
-          }
-        }
-        if (hasOutdated) {
-          console.log("Outdated $63,500 support level detected in cache. Resetting volatility cache for live regeneration...");
-          persistentCache.volatility = null;
-        }
-      }
     } else {
       // Pre-seed with polished mock metrics/DCA playbooks to prevent ANY initial API quota consumption
       persistentCache = {
         volatility: {
-          analysis: `<h3>Core Driving Factors</h3>
+          "gemini-3.1-flash-lite": {
+            analysis: `<h3>Core Driving Factors</h3>
 <p>Bitcoin is currently consolidating below the psychological $60,000 threshold, driven by short-term spot market liquidations and macro liquidity shifts. While structural long-term holder demand remains intact, tactical resistance has intensified under persistent high-interest-rate guidance from central banks.</p>
 <ul>
   <li><strong>Spot Market Liquidations:</strong> A series of leveraged long squeezes has driven the price below $60k, activating deep historical buy walls in the mid-$50k region.</li>
@@ -159,7 +111,8 @@ function loadOrCreateCache() {
   <li><strong>Major Resistance:</strong> Thick selling thresholds have formed between <strong>$59,500 – $61,000</strong> USD, which bulls must reclaim to restore medium-term upside momentum.</li>
   <li><strong>On-Chain Metrics:</strong> Network hash rate and difficulty remain near peak heights, highlighting exceptional security and miner network health.</li>
 </ul>`,
-          timestamp: Date.now()
+            timestamp: Date.now()
+          }
         },
         dca: {
           "100_Weekly_1 Year_Moderate_USD": {
@@ -305,6 +258,37 @@ function loadOrCreateCache() {
       };
       fs.writeFileSync(WRITE_CACHE_FILE, JSON.stringify(persistentCache, null, 2), "utf-8");
       console.log("Pre-seeded persistent Gemini cache created on disk.");
+    }
+
+    // Safely verify and normalize loaded/created volatility cache to multi-engine format
+    if (!persistentCache.volatility) {
+      persistentCache.volatility = {};
+    } else if (typeof (persistentCache.volatility as any).analysis === "string") {
+      // Migrate from old single-engine format
+      persistentCache.volatility = {
+        "gemini-3.1-flash-lite": {
+          analysis: (persistentCache.volatility as any).analysis,
+          timestamp: (persistentCache.volatility as any).timestamp || Date.now()
+        }
+      };
+    }
+
+    if (!persistentCache.dca) {
+      persistentCache.dca = {};
+    }
+
+    // Check for outdated support levels in any volatility sub-caches
+    let hasOutdated = false;
+    for (const key of Object.keys(persistentCache.volatility)) {
+      const entry = persistentCache.volatility[key];
+      if (entry && typeof entry.analysis === "string" && entry.analysis.includes("$63,500")) {
+        hasOutdated = true;
+        break;
+      }
+    }
+    if (hasOutdated) {
+      console.log("Outdated $63,500 support level detected in cache. Resetting volatility cache for live regeneration...");
+      persistentCache.volatility = {};
     }
   } catch (err) {
     console.error("Failed to load or create Gemini cache on disk:", err);
