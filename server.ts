@@ -3,7 +3,6 @@ dotenv.config();
 
 import express from "express";
 import path from "path";
-import fs from "fs";
 import { GoogleGenAI } from "@google/genai";
 
 const app = express();
@@ -37,14 +36,9 @@ const CACHE_TTL_MS = 60 * 1000; // 1 minute price validity
 const FNG_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes Fear and Greed validity
 
 // ----------------------------------------------------
-// Persistent Disk Cache & Pre-seeding Setup
+// In-Memory Global Variable Cache Setup
 // ----------------------------------------------------
-const isVercel = !!process.env.VERCEL;
-const DEPLOY_CACHE_FILE = path.join(process.cwd(), "gemini-cache.json");
-const WRITE_CACHE_FILE = isVercel 
-  ? path.join("/tmp", "gemini-cache.json")
-  : DEPLOY_CACHE_FILE;
-const GEMINI_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const GEMINI_CACHE_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 
 interface PersistentCache {
   volatility: Record<string, {
@@ -57,39 +51,11 @@ interface PersistentCache {
   }>;
 }
 
-let persistentCache: PersistentCache = {
-  volatility: {},
-  dca: {}
-};
-
-let lastQuotaExceededTime = 0;
-const QUOTA_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes cooldown period
-
-function loadOrCreateCache() {
-  try {
-    if (fs.existsSync(WRITE_CACHE_FILE)) {
-      const data = fs.readFileSync(WRITE_CACHE_FILE, "utf-8");
-      persistentCache = JSON.parse(data);
-      console.log("Persistent Gemini cache loaded from writable path:", WRITE_CACHE_FILE);
-    } else if (fs.existsSync(DEPLOY_CACHE_FILE)) {
-      const data = fs.readFileSync(DEPLOY_CACHE_FILE, "utf-8");
-      persistentCache = JSON.parse(data);
-      console.log("Persistent Gemini cache loaded from deployment path:", DEPLOY_CACHE_FILE);
-      
-      if (isVercel) {
-        try {
-          fs.writeFileSync(WRITE_CACHE_FILE, JSON.stringify(persistentCache, null, 2), "utf-8");
-          console.log("Copied pre-seeded cache to writable path:", WRITE_CACHE_FILE);
-        } catch (copyErr) {
-          console.warn("Could not copy cache to /tmp:", copyErr);
-        }
-      }
-    } else {
-      // Pre-seed with polished mock metrics/DCA playbooks to prevent ANY initial API quota consumption
-      persistentCache = {
-        volatility: {
-          "gemini-3.1-flash-lite": {
-            analysis: `<h3>Core Driving Factors</h3>
+// Global variable outside of main functions to hold the cache
+const memoryCache: PersistentCache = {
+  volatility: {
+    "gemini-3.1-flash-lite": {
+      analysis: `<h3>Core Driving Factors</h3>
 <p>Bitcoin is currently consolidating below the psychological $60,000 threshold, driven by short-term spot market liquidations and macro liquidity shifts. While structural long-term holder demand remains intact, tactical resistance has intensified under persistent high-interest-rate guidance from central banks.</p>
 <ul>
   <li><strong>Spot Market Liquidations:</strong> A series of leveraged long squeezes has driven the price below $60k, activating deep historical buy walls in the mid-$50k region.</li>
@@ -111,12 +77,12 @@ function loadOrCreateCache() {
   <li><strong>Major Resistance:</strong> Thick selling thresholds have formed between <strong>$59,500 – $61,000</strong> USD, which bulls must reclaim to restore medium-term upside momentum.</li>
   <li><strong>On-Chain Metrics:</strong> Network hash rate and difficulty remain near peak heights, highlighting exceptional security and miner network health.</li>
 </ul>`,
-            timestamp: Date.now()
-          }
-        },
-        dca: {
-          "100_Weekly_1 Year_Moderate_USD": {
-            strategy: `<h3>Strategic DCA Routine</h3>
+      timestamp: Date.now()
+    }
+  },
+  dca: {
+    "100_Weekly_1 Year_Moderate_USD": {
+      strategy: `<h3>Strategic DCA Routine</h3>
 <p>Formulating a balanced, moderate-risk dollar-cost averaging strategy tailored for a <strong>$100 USD Weekly</strong> budget over a <strong>1 Year</strong> horizon. By implementing a disciplined, non-emotional routine, you hedge against short-term price fluctuations while accumulating a solid foundational position.</p>
 <ul>
   <li><strong>Base Weekly Allocation:</strong> Deploy exactly <strong>$100 USD</strong> every Tuesday at a consistent time to capture average weekly prices.</li>
@@ -148,10 +114,10 @@ function loadOrCreateCache() {
   <li><strong>-20% Drawdown (from local peak):</strong> Allocate an extra one-off 3.0x weekly budget (<strong>$300 USD</strong>) from your secondary cash reserves.</li>
 </ul>
 <p class="text-[10px] text-slate-500 mt-4 italic">Disclaimer: Content delivered by this agent is intended for research purposes only. It is not formal investment advice.</p>`,
-            timestamp: Date.now()
-          },
-          "100_Weekly_1 Year_Moderate_AUD": {
-            strategy: `<h3>Strategic DCA Routine</h3>
+      timestamp: Date.now()
+    },
+    "100_Weekly_1 Year_Moderate_AUD": {
+      strategy: `<h3>Strategic DCA Routine</h3>
 <p>Formulating a balanced, moderate-risk dollar-cost averaging strategy tailored for a <strong>A$151 AUD Weekly</strong> budget over a <strong>1 Year</strong> horizon. By implementing a disciplined, non-emotional routine, you hedge against short-term price fluctuations while accumulating a solid foundational position.</p>
 <ul>
   <li><strong>Base Weekly Allocation:</strong> Deploy exactly <strong>A$151 AUD</strong> every Tuesday at a consistent time to capture average weekly prices.</li>
@@ -183,10 +149,10 @@ function loadOrCreateCache() {
   <li><strong>-20% Drawdown (from local peak):</strong> Allocate an extra one-off 3.0x weekly budget (<strong>A$453.00 AUD</strong>) from your secondary cash reserves.</li>
 </ul>
 <p class="text-[10px] text-slate-500 mt-4 italic">Disclaimer: Content delivered by this agent is intended for research purposes only. It is not formal investment advice.</p>`,
-            timestamp: Date.now()
-          },
-          "15_Daily_1 Year_Aggressive_USD": {
-            strategy: `<h3>Strategic DCA Routine</h3>
+      timestamp: Date.now()
+    },
+    "15_Daily_1 Year_Aggressive_USD": {
+      strategy: `<h3>Strategic DCA Routine</h3>
 <p>Formulating an aggressive-risk dollar-cost averaging strategy tailored for a <strong>$15 USD Daily</strong> budget over a <strong>1 Year</strong> horizon. An aggressive approach focuses on maximizing sat accumulation during any short-term dips.</p>
 <ul>
   <li><strong>Base Daily Allocation:</strong> Deploy exactly <strong>$15 USD</strong> daily to achieve a highly smoothed purchase price index.</li>
@@ -207,10 +173,10 @@ function loadOrCreateCache() {
   <li><strong>-20% Drawdown:</strong> Allocate an extra 5.0x daily budget (<strong>$75 USD</strong>).</li>
 </ul>
 <p class="text-[10px] text-slate-500 mt-4 italic">Disclaimer: Content delivered by this agent is intended for research purposes only. It is not formal investment advice.</p>`,
-            timestamp: Date.now()
-          },
-          "150_Weekly_2 Years_Moderate_USD": {
-            strategy: `<h3>Strategic DCA Routine</h3>
+      timestamp: Date.now()
+    },
+    "150_Weekly_2 Years_Moderate_USD": {
+      strategy: `<h3>Strategic DCA Routine</h3>
 <p>Formulating a moderate-risk dollar-cost averaging strategy tailored for a <strong>$150 USD Weekly</strong> budget over a <strong>2 Years</strong> horizon.</p>
 <ul>
   <li><strong>Base Weekly Allocation:</strong> Deploy exactly <strong>$150 USD</strong> every Wednesday.</li>
@@ -231,10 +197,10 @@ function loadOrCreateCache() {
   <li><strong>-20% Drawdown:</strong> Allocate an extra 3.0x weekly budget (<strong>$450 USD</strong>).</li>
 </ul>
 <p class="text-[10px] text-slate-500 mt-4 italic">Disclaimer: Content delivered by this agent is intended for research purposes only. It is not formal investment advice.</p>`,
-            timestamp: Date.now()
-          },
-          "1000_Monthly_5 Years_Conservative_USD": {
-            strategy: `<h3>Strategic DCA Routine</h3>
+      timestamp: Date.now()
+    },
+    "1000_Monthly_5 Years_Conservative_USD": {
+      strategy: `<h3>Strategic DCA Routine</h3>
 <p>Formulating a conservative-risk dollar-cost averaging strategy tailored for a <strong>$1000 USD Monthly</strong> budget over a <strong>5 Years</strong> horizon. A conservative, long-term approach prioritizes capital preservation and deep market cycles.</p>
 <ul>
   <li><strong>Base Monthly Allocation:</strong> Deploy exactly <strong>$1000 USD</strong> on the 1st of every month.</li>
@@ -252,74 +218,29 @@ function loadOrCreateCache() {
   <li><strong>-20% Drawdown:</strong> Allocate an extra 2.0x monthly budget (<strong>$2000 USD</strong>).</li>
 </ul>
 <p class="text-[10px] text-slate-500 mt-4 italic">Disclaimer: Content delivered by this agent is intended for research purposes only. It is not formal investment advice.</p>`,
-            timestamp: Date.now()
-          }
-        }
-      };
-      fs.writeFileSync(WRITE_CACHE_FILE, JSON.stringify(persistentCache, null, 2), "utf-8");
-      console.log("Pre-seeded persistent Gemini cache created on disk.");
+      timestamp: Date.now()
     }
+  }
+};
 
-    // Safely verify and normalize loaded/created volatility cache to multi-engine format
-    if (!persistentCache.volatility) {
-      persistentCache.volatility = {};
-    } else if (typeof (persistentCache.volatility as any).analysis === "string") {
-      // Migrate from old single-engine format
-      persistentCache.volatility = {
-        "gemini-3.1-flash-lite": {
-          analysis: (persistentCache.volatility as any).analysis,
-          timestamp: Date.now()
-        }
-      };
-    }
+const persistentCache = memoryCache;
 
-    // Refresh all loaded volatility cache timestamps to now so they are valid on startup
-    for (const key of Object.keys(persistentCache.volatility)) {
-      if (persistentCache.volatility[key]) {
-        persistentCache.volatility[key].timestamp = Date.now();
-      }
-    }
+let lastQuotaExceededTime = 0;
+const QUOTA_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes cooldown period
 
-    if (!persistentCache.dca) {
-      persistentCache.dca = {};
-    } else {
-      // Refresh all loaded DCA cache timestamps to now so they are valid on startup
-      for (const key of Object.keys(persistentCache.dca)) {
-        if (persistentCache.dca[key]) {
-          persistentCache.dca[key].timestamp = Date.now();
-        }
-      }
-    }
-
-    // Check for outdated support levels in any volatility sub-caches
-    let hasOutdated = false;
-    for (const key of Object.keys(persistentCache.volatility)) {
-      const entry = persistentCache.volatility[key];
-      if (entry && typeof entry.analysis === "string" && entry.analysis.includes("$63,500")) {
-        hasOutdated = true;
-        break;
-      }
-    }
-    if (hasOutdated) {
-      console.log("Outdated $63,500 support level detected in cache. Resetting volatility cache for live regeneration...");
-      persistentCache.volatility = {};
-    }
-  } catch (err) {
-    console.error("Failed to load or create Gemini cache on disk:", err);
+// Check for outdated support levels in any volatility sub-caches and reset if needed
+let hasOutdated = false;
+for (const key of Object.keys(persistentCache.volatility)) {
+  const entry = persistentCache.volatility[key];
+  if (entry && typeof entry.analysis === "string" && entry.analysis.includes("$63,500")) {
+    hasOutdated = true;
+    break;
   }
 }
-
-function saveCacheToDisk() {
-  try {
-    fs.writeFileSync(WRITE_CACHE_FILE, JSON.stringify(persistentCache, null, 2), "utf-8");
-    console.log("Persistent Gemini cache written to disk at:", WRITE_CACHE_FILE);
-  } catch (err) {
-    console.error("Failed to save Gemini cache to disk:", err);
-  }
+if (hasOutdated) {
+  console.log("Outdated $63,500 support level detected in memory cache. Resetting volatility cache for live regeneration...");
+  persistentCache.volatility = {};
 }
-
-// Initialise persistent cache
-loadOrCreateCache();
 
 // High-fidelity 13-year Bitcoin historical trend generator to power 1Y, 4Y, and ALL time charts
 function generateFullHistory(livePrice: number) {
@@ -745,6 +666,36 @@ async function queryDeepSeekViaOpenRouter(prompt: string, systemInstruction: str
   }
 }
 
+// Helper to fetch live market context from public APIs
+async function fetchLiveMarketContext() {
+  let price = "N/A";
+  let volume = "N/A";
+  let fgi = "N/A";
+
+  try {
+    const binanceRes = await fetch("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT");
+    if (binanceRes.ok) {
+      const binanceData = await binanceRes.json() as any;
+      price = binanceData.lastPrice ? `${Math.round(parseFloat(binanceData.lastPrice))}` : "N/A";
+      volume = binanceData.volume ? `${Math.round(parseFloat(binanceData.volume))}` : "N/A";
+    }
+  } catch (e: any) {
+    console.warn("Failed to fetch Binance ticker:", e.message);
+  }
+
+  try {
+    const fngRes = await fetch("https://api.alternative.me/fng/");
+    if (fngRes.ok) {
+      const fngData = await fngRes.json() as any;
+      fgi = fngData.data?.[0]?.value || "N/A";
+    }
+  } catch (e: any) {
+    console.warn("Failed to fetch Fear & Greed Index:", e.message);
+  }
+
+  return { price, volume, fgi };
+}
+
 // 3. AI News Summary on Volatility Driving Factors (using dynamic AI selection: gemini-3.5-flash, gemini-3.1-flash-lite, or deepseek-v4-flash)
 registerRoute("/ai/volatility-analysis", async (req, res) => {
   const now = Date.now();
@@ -796,9 +747,18 @@ registerRoute("/ai/volatility-analysis", async (req, res) => {
   try {
     let finalReport = "";
 
-    const systemInstruction = "You are an elite quantitative portfolio manager and cryptofinance analyst. Formulate deep, highly accurate, and formatted HTML cryptofinance volatility reports.";
+    // Fetch live market data first
+    const marketData = await fetchLiveMarketContext();
+
+    const systemInstruction = `You are a quantitative financial analyst. You are provided with real-time market data in the prompt. Do not perform web searches. Do not use external tools. Base your entire analysis, volatility synthesis, and forecasting strictly on the provided data points and your internal pre-trained financial models.`;
     const prompt = `Perform a deep cryptofinance analysis of recent Bitcoin price volatility, Spot ETF flows, and macroeconomic interest rate/CPI decisions.
-The current Bitcoin price is around ${refPrice} ${refCurrency} (which is clearly below $60,000 USD). Ground all of your structural level extraction in this current sub-$60k price context. Set realistic support levels (e.g., $52,000 – $55,000) and resistance levels (e.g., $59,500 – $61,000).
+
+[Provided Real-Time Market Data]
+- Current Bitcoin Price: ${marketData.price !== "N/A" ? marketData.price : refPrice} ${refCurrency}
+- 24h Volume: ${marketData.volume}
+- Fear & Greed Index: ${marketData.fgi}
+
+Ground all of your structural level extraction in this current price context. Set realistic support levels (e.g., $52,000 – $55,000) and resistance levels (e.g., $59,500 – $61,000).
 
 Structure your final report into the following exact sections using clean HTML tags (like <h3>, <p>, <ul>, <li>, etc.):
 1. "Core Driving Factors": Detail what is causing price fluctuations right now.
@@ -808,33 +768,31 @@ Structure your final report into the following exact sections using clean HTML t
 Please ensure the tone is professional, objectively financial, and directly analytical. Avoid vague buzzwords or informal phrasing.`;
 
     if (engine === "deepseek-v4-flash") {
-      finalReport = await queryDeepSeekViaOpenRouter(prompt, systemInstruction);
+      try {
+        finalReport = await queryDeepSeekViaOpenRouter(prompt, systemInstruction);
+      } catch (deepseekErr: any) {
+        console.warn(`[OpenRouter] DeepSeek query failed: ${deepseekErr.message}. Falling back to gemini-3.1-flash-lite live...`);
+        const ai = getGeminiClient();
+        const response = await ai.models.generateContent({
+          model: "gemini-3.1-flash-lite",
+          contents: prompt,
+          config: {
+            systemInstruction,
+          },
+        });
+        finalReport = response.text || "<p>Analysis currently unavailable.</p>";
+      }
     } else {
       const ai = getGeminiClient();
       console.log(`Activating ${engine}. Reference price is currently ${refPrice} ${refCurrency}...`);
       
-      let response;
-      try {
-        // Try calling Gemini with Google Search tool grounding
-        response = await ai.models.generateContent({
-          model: engine,
-          contents: prompt + "\n\nPlease perform a live web search to back up this report with the most recent info.",
-          config: {
-            systemInstruction,
-            tools: [{ googleSearch: {} }],
-          },
-        });
-      } catch (searchErr: any) {
-        console.warn(`[Gemini API] Search tool call failed for ${engine}, retrying without search grounding... Error:`, searchErr.message);
-        // Fallback retry without search grounding
-        response = await ai.models.generateContent({
-          model: engine,
-          contents: prompt + "\n\nProvide the analysis directly using your current knowledge.",
-          config: {
-            systemInstruction,
-          },
-        });
-      }
+      const response = await ai.models.generateContent({
+        model: engine,
+        contents: prompt,
+        config: {
+          systemInstruction,
+        },
+      });
       finalReport = response.text || "<p>Analysis currently unavailable.</p>";
     }
 
@@ -843,7 +801,6 @@ Please ensure the tone is professional, objectively financial, and directly anal
       analysis: finalReport,
       timestamp: now
     };
-    saveCacheToDisk();
 
     return res.json({ 
       analysis: finalReport,
@@ -878,7 +835,6 @@ Please ensure the tone is professional, objectively financial, and directly anal
         analysis: finalFallbackReport,
         timestamp: Date.now()
       };
-      saveCacheToDisk();
     } catch (cacheWriteErr) {
       console.error("Failed to write fallback to volatility cache:", cacheWriteErr);
     }
@@ -933,7 +889,9 @@ registerRoute("/ai/dca-advisor", async (req, res) => {
   try {
     let finalStrategy = "";
 
-    const systemInstruction = "You are an elite quantitative cryptofinance analyst. Synthesize institutional flows, macro events, and DCA mathematics into beautifully structured HTML advisor responses.";
+    const marketData = await fetchLiveMarketContext();
+
+    const systemInstruction = `You are a quantitative financial analyst. You are provided with real-time market data in the prompt. Do not perform web searches. Do not use external tools. Base your entire analysis, volatility synthesis, and forecasting strictly on the provided data points and your internal pre-trained financial models.`;
     const prompt = `Formulate a highly customized, safe, and tactical Bitcoin DCA model based on these parameters:
 
 User DCA Parameters:
@@ -941,7 +899,11 @@ User DCA Parameters:
 - **Investing Interval:** ${frequency || "Weekly"}
 - **Target Investing Horizon:** ${timeHorizon || "1 Year"}
 - **Risk Tolerance Profile:** ${riskProfile || "Moderate"}
-- **Estimated Current Reference Price:** ${currencyChar}${currentPrice || 67000} ${currencySymbol}
+
+[Provided Real-Time Market Data]
+- Current Bitcoin Price: ${currencyChar}${marketData.price !== "N/A" ? marketData.price : (currentPrice || 67000)} ${currencySymbol}
+- 24h Volume: ${marketData.volume}
+- Fear & Greed Index: ${marketData.fgi}
 
 Provide a highly scannable tactical blueprint containing:
 1. "Strategic DCA Routine": Break down the suggested regular investment and any potential dynamic 'scaling strategies' (e.g., investing 20% more if Fear & Greed Index drops below 30).
@@ -952,41 +914,38 @@ Provide a highly scannable tactical blueprint containing:
 Write output using cleanly formatted HTML tags (like <h3>, <p>, <strong>, and lists <ul>/<li>) so it aligns elegantly in our modern crypto dashboard interface. Keep it objective, professional, and clear. Ensure you state at the bottom that this is informational research and not financial advice.`;
 
     if (engine === "deepseek-v4-flash") {
-      finalStrategy = await queryDeepSeekViaOpenRouter(prompt, systemInstruction);
+      try {
+        finalStrategy = await queryDeepSeekViaOpenRouter(prompt, systemInstruction);
+      } catch (deepseekErr: any) {
+        console.warn(`[OpenRouter] DeepSeek query failed: ${deepseekErr.message}. Falling back to gemini-3.1-flash-lite live...`);
+        const ai = getGeminiClient();
+        const response = await ai.models.generateContent({
+          model: "gemini-3.1-flash-lite",
+          contents: prompt,
+          config: {
+            systemInstruction,
+          },
+        });
+        finalStrategy = response.text || "<p>Blueprint currently unavailable.</p>";
+      }
     } else {
       const ai = getGeminiClient();
       console.log(`Activating ${engine} to scrape & filter DCA macro conditions...`);
-      let response;
-      try {
-        // Try calling Gemini with Google Search tool grounding
-        response = await ai.models.generateContent({
-          model: engine,
-          contents: prompt + "\n\nPlease also perform a live web search for institutional Bitcoin sentiments, BlackRock & Fidelity Spot ETF inflows/outflows, and upcoming macro inflation markers.",
-          config: {
-            systemInstruction,
-            tools: [{ googleSearch: {} }],
-          },
-        });
-      } catch (searchErr: any) {
-        console.warn(`[Gemini API] Search tool call failed for DCA advisor on ${engine}, retrying without search grounding... Error:`, searchErr.message);
-        // Fallback retry without search grounding
-        response = await ai.models.generateContent({
-          model: engine,
-          contents: prompt + "\n\nProvide the DCA recommendation directly using your current knowledge.",
-          config: {
-            systemInstruction,
-          },
-        });
-      }
+      const response = await ai.models.generateContent({
+        model: engine,
+        contents: prompt,
+        config: {
+          systemInstruction,
+        },
+      });
       finalStrategy = response.text || "<p>Blueprint currently unavailable.</p>";
     }
 
-    // Save to persistent cache and disk
+    // Save to persistent cache
     persistentCache.dca[cacheKey] = {
       strategy: finalStrategy,
       timestamp: now
     };
-    saveCacheToDisk();
 
     return res.json({ strategy: finalStrategy });
   } catch (error: any) {
@@ -1022,7 +981,6 @@ Write output using cleanly formatted HTML tags (like <h3>, <p>, <strong>, and li
         strategy: finalFallbackStrategy,
         timestamp: Date.now()
       };
-      saveCacheToDisk();
     } catch (cacheWriteErr) {
       console.error("Failed to write fallback to DCA cache:", cacheWriteErr);
     }

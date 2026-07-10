@@ -1314,7 +1314,7 @@ export default function App() {
 
               <div className="mt-4 pt-3 border-t border-slate-900 flex items-center justify-between text-[10px] text-slate-500">
                 <span>Model: {volatilityModel}</span>
-                <span>Grounding: Google Search</span>
+                <span>Grounding: Nexus Data-Stream (Live)</span>
               </div>
             </div>
 
