@@ -148,13 +148,39 @@ export default function App() {
     return saved ? Number(saved) : 120000;
   });
 
-  // Methodology selection for projections
-  const [projectionMethod, setProjectionMethod] = useState<"conservative" | "consensus" | "bullwave">("consensus");
+  // Methodology selection for projections (remembered in localStorage)
+  const [projectionMethod, setProjectionMethod] = useState<"conservative" | "consensus" | "bullwave">(() => {
+    const saved = localStorage.getItem("btc_calc_proj_method");
+    return (saved === "conservative" || saved === "consensus" || saved === "bullwave") ? saved : "consensus";
+  });
 
-  // Premium Layout Addition States (supporting 1D intraday live performance chart)
-  const [chartDaysFilter, setChartDaysFilter] = useState<1 | 7 | 14 | 30 | 365 | 1460 | 9999>(30);
+  // Premium Layout Addition States (supporting 1D intraday live performance chart, remembered in localStorage)
+  const [chartDaysFilter, setChartDaysFilter] = useState<1 | 7 | 14 | 30 | 365 | 1460 | 9999>(() => {
+    const saved = localStorage.getItem("btc_calc_chart_days");
+    const num = saved ? Number(saved) : 30;
+    return [1, 7, 14, 30, 365, 1460, 9999].includes(num) ? (num as any) : 30;
+  });
   const [copiedAdvisory, setCopiedAdvisory] = useState<boolean>(false);
+  const [copiedVolatility, setCopiedVolatility] = useState<boolean>(false);
   const [estimatedBlockHeight, setEstimatedBlockHeight] = useState<number>(848521);
+
+  // Calculator Mode Switch: "scenario" (Target Exit Target) vs "dca" (Recurring Accumulation Schedule)
+  const [calcTab, setCalcTab] = useState<"scenario" | "dca">(() => {
+    const saved = localStorage.getItem("btc_calc_tab");
+    return (saved === "scenario" || saved === "dca") ? saved : "scenario";
+  });
+  const [dcaFrequency, setDcaFrequency] = useState<"weekly" | "monthly">(() => {
+    const saved = localStorage.getItem("btc_calc_dca_freq");
+    return (saved === "weekly" || saved === "monthly") ? saved : "weekly";
+  });
+  const [dcaPeriodicAmount, setDcaPeriodicAmount] = useState<number>(() => {
+    const saved = localStorage.getItem("btc_calc_dca_amount");
+    return saved ? Number(saved) : 100;
+  });
+  const [dcaDurationYears, setDcaDurationYears] = useState<number>(() => {
+    const saved = localStorage.getItem("btc_calc_dca_years");
+    return saved ? Number(saved) : 1;
+  });
 
   // Synchronization Hub states
   const [isSyncOpen, setIsSyncOpen] = useState<boolean>(false);
@@ -172,7 +198,7 @@ export default function App() {
     return () => clearInterval(blockTimer);
   }, []);
 
-  // Auto-save calculator parameters to localStorage on changes
+  // Auto-save calculator and user preferences to localStorage on changes
   useEffect(() => {
     localStorage.setItem("btc_calc_currency", calcCurrency);
     localStorage.setItem("btc_calc_input_mode", calcInputMode);
@@ -180,7 +206,26 @@ export default function App() {
     localStorage.setItem("btc_calc_invest_amount", investAmount.toString());
     localStorage.setItem("btc_calc_entry_price", calcEntryPrice.toString());
     localStorage.setItem("btc_calc_exit_price", calcExitPrice.toString());
-  }, [calcCurrency, calcInputMode, calcBtcAmount, investAmount, calcEntryPrice, calcExitPrice]);
+    localStorage.setItem("btc_calc_proj_method", projectionMethod);
+    localStorage.setItem("btc_calc_chart_days", chartDaysFilter.toString());
+    localStorage.setItem("btc_calc_tab", calcTab);
+    localStorage.setItem("btc_calc_dca_freq", dcaFrequency);
+    localStorage.setItem("btc_calc_dca_amount", dcaPeriodicAmount.toString());
+    localStorage.setItem("btc_calc_dca_years", dcaDurationYears.toString());
+  }, [
+    calcCurrency,
+    calcInputMode,
+    calcBtcAmount,
+    investAmount,
+    calcEntryPrice,
+    calcExitPrice,
+    projectionMethod,
+    chartDaysFilter,
+    calcTab,
+    dcaFrequency,
+    dcaPeriodicAmount,
+    dcaDurationYears,
+  ]);
 
   // ----------------------------------------------------
   // API Fetching Routines
@@ -273,7 +318,20 @@ export default function App() {
     try {
       console.warn("[Sync Hub] Server is unreachable or returned non-200. Recovering directly via public feeds...");
       let resolvedLiveUSD = 58300; // absolute fallback
-      let fxRate = 1.5130;
+      let fxRate = 1.40;
+
+      // Try fetching live FX rate directly from browser
+      try {
+        const fxRes = await fetch("https://open.er-api.com/v6/latest/USD");
+        if (fxRes.ok) {
+          const fxData = await fxRes.json();
+          if (fxData?.rates?.AUD && typeof fxData.rates.AUD === "number") {
+            fxRate = parseFloat(fxData.rates.AUD.toFixed(4));
+          }
+        }
+      } catch (fxErr) {
+        console.warn("[Sync Hub] Client FX recovery fallback to 1.40:", fxErr);
+      }
 
       // Attempt 1: CoinDesk
       try {
@@ -365,7 +423,7 @@ export default function App() {
               const clientData = await clientRes.json();
               if (clientData?.bpi?.USD?.rate_float) {
                 const liveUSD = clientData.bpi.USD.rate_float;
-                const fxRate = data.fxRate || 1.51;
+                const fxRate = data.fxRate || 1.40;
                 const liveAUD = liveUSD * fxRate;
                 
                 // Reconstruct the payload with the actual live price on the client side
@@ -564,6 +622,95 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
+  const copyVolatilityReport = async () => {
+    if (!volatilityAnalysis) return;
+    try {
+      const cleanText = volatilityAnalysis
+        .replace(/<h3>/g, "\n\n### ")
+        .replace(/<\/h3>/g, "\n")
+        .replace(/<strong>/g, "**")
+        .replace(/<\/strong>/g, "**")
+        .replace(/<li>/g, "- ")
+        .replace(/<\/li>/g, "\n")
+        .replace(/<p>/g, "")
+        .replace(/<\/p>/g, "\n\n")
+        .replace(/<[^>]*>/g, "")
+        .trim();
+
+      await navigator.clipboard.writeText(`NEXUS BTC INTELLIGENCE BRIEFING\nGenerated via ${volatilityModel} (${new Date().toLocaleDateString()})\nReference Spot: ${currentSymbol}${Math.round(currentLivePrice).toLocaleString()} ${currency}\n\n${cleanText}`);
+      setCopiedVolatility(true);
+      setTimeout(() => setCopiedVolatility(false), 2500);
+    } catch (err) {
+      console.warn("Clipboard write failed:", err);
+    }
+  };
+
+  const downloadVolatilityMarkdown = () => {
+    if (!volatilityAnalysis) return;
+    const cleanText = volatilityAnalysis
+      .replace(/<h3>/g, "\n\n### ")
+      .replace(/<\/h3>/g, "\n")
+      .replace(/<strong>/g, "**")
+      .replace(/<\/strong>/g, "**")
+      .replace(/<li>/g, "- ")
+      .replace(/<\/li>/g, "\n")
+      .replace(/<p>/g, "")
+      .replace(/<\/p>/g, "\n\n")
+      .replace(/<[^>]*>/g, "")
+      .trim();
+
+    const mdContent = `# Nexus BTC Market Volatility Briefing\n**Date:** ${new Date().toISOString()}\n**Engine:** ${volatilityModel}\n**Spot Rate:** ${currentSymbol}${Math.round(currentLivePrice).toLocaleString()} (${currency})\n**Fear & Greed Index:** ${fngScore} (${fngData?.sentiment || 'Neutral'})\n\n---\n\n${cleanText}\n\n---\n*Delivered by Nexus BTC Intelligence Engine.*`;
+    const blob = new Blob([mdContent], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `nexus_btc_volatility_${new Date().toISOString().split('T')[0]}.md`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadDcaCsv = () => {
+    const activeCalcPrice = priceData ? priceData[calcCurrency].livePrice : (calcCurrency === "USD" ? 58300 : 88033);
+    const endFactor = multipliers[projectionMethod][dcaDurationYears >= 4 ? "halving4yr" : "annual"];
+    const avgCostBasis = activeCalcPrice * (1 + (endFactor - 1) * 0.45);
+    const totalPeriods = (dcaFrequency === "weekly" ? 52 : 12) * dcaDurationYears;
+    const totalInvested = dcaPeriodicAmount * totalPeriods;
+    const estimatedBtc = totalInvested / (avgCostBasis > 0 ? avgCostBasis : activeCalcPrice);
+    const projectedTargetPrice = activeCalcPrice * endFactor;
+    const projectedVal = estimatedBtc * projectedTargetPrice;
+    const profit = projectedVal - totalInvested;
+
+    const rows = [
+      ["Metric", "Value"],
+      ["Currency", calcCurrency],
+      ["Frequency", dcaFrequency],
+      ["Periodic Investment", `${calcSymbol}${dcaPeriodicAmount}`],
+      ["Accumulation Horizon (Years)", dcaDurationYears.toString()],
+      ["Total Investment Periods", totalPeriods.toString()],
+      ["Total Principal Deployed", `${calcSymbol}${totalInvested}`],
+      ["Estimated Average Cost Basis", `${calcSymbol}${Math.round(avgCostBasis)}`],
+      ["Accumulated Bitcoin (BTC)", estimatedBtc.toFixed(8)],
+      ["Accumulated Satoshis", Math.round(estimatedBtc * 100000000).toLocaleString()],
+      ["Projected BTC Price (Cycle Peak)", `${calcSymbol}${Math.round(projectedTargetPrice)}`],
+      ["Projected Portfolio Valuation", `${calcSymbol}${Math.round(projectedVal)}`],
+      ["Projected Net Return", `${calcSymbol}${Math.round(profit)}`],
+      ["ROI (%)", `${totalInvested > 0 ? ((profit / totalInvested) * 100).toFixed(2) : "0"}%`],
+      ["Model Methodology", projectionMethod],
+      ["Exported Timestamp", new Date().toISOString()]
+    ];
+
+    const csvContent = "data:text/csv;charset=utf-8," + rows.map(e => e.map(i => `"${i}"`).join(",")).join("\n");
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `nexus_btc_dca_plan_${calcCurrency}_${new Date().toISOString().split('T')[0]}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const handleImportData = (rawJson: string): { success: boolean; message: string } => {
     try {
       const data = JSON.parse(rawJson);
@@ -689,74 +836,6 @@ export default function App() {
   const currentLivePrice = activeStats.livePrice;
   const currentSymbol = activeStats.symbol;
 
-  // Calculators logic
-  const calcSymbol = calcCurrency === "USD" ? "$" : "A$";
-
-  const calcInvestAmount = calcInputMode === "fiat" ? investAmount : (calcBtcAmount * calcEntryPrice);
-  const totalBtcHoldings = calcInputMode === "fiat" ? (investAmount / calcEntryPrice) : calcBtcAmount;
-  const targetExitValue = totalBtcHoldings * calcExitPrice;
-  const netProfit = targetExitValue - calcInvestAmount;
-  const roiPercentage = calcInvestAmount > 0 ? (netProfit / calcInvestAmount) * 100 : 0;
-
-  // ----------------------------------------------------
-  // Expert Modelling & Sentiment Score Formula
-  // ----------------------------------------------------
-  const fngScore = fngData?.value || 62;
-  const change24hVal = activeStats.change24h;
-
-  // Compute a comprehensive oscillator score from 0 to 100
-  // Combining F&G index and short-term price trend
-  const rsiSimulated = Math.round(50 + (change24hVal * 4) + ((fngScore - 50) * 0.3));
-  const rsiBounded = Math.max(15, Math.min(90, rsiSimulated));
-  
-  // EMA support signals: True if current price > daily floor
-  const emaSignal = change24hVal > -1 ? "Bullish Crossover" : "Consolidating Support";
-  
-  // Decide overall rating
-  let recommendation: "Strong Buy" | "Accumulate" | "Hold" | "Sell / Reduce";
-  let recommendationDetail = "";
-  let recColor = "";
-  let recBg = "";
-
-  const totalExpertMetric = Math.round((fngScore * 0.45) + (rsiBounded * 0.35) + (change24hVal >= 0 ? 20 : 5));
-  
-  if (totalExpertMetric < 35) {
-    recommendation = "Strong Buy";
-    recommendationDetail = "Systemic distress. Market oscillators indicate severe oversold conditions. High discount zone for strategic accumulators.";
-    recColor = "text-red-400";
-    recBg = "bg-red-950/40 border-red-900/40";
-  } else if (totalExpertMetric < 55) {
-    recommendation = "Accumulate";
-    recommendationDetail = "Favorable Dollar Cost Average pricing index. High institutional support floors are active beneath immediate support lines.";
-    recColor = "text-emerald-400 font-bold";
-    recBg = "bg-emerald-950/40 border-emerald-900/40";
-  } else if (totalExpertMetric < 75) {
-    recommendation = "Hold";
-    recommendationDetail = "Baseline balanced accumulation. Speculative momentum remains neutral. Proceed slowly with standard routine recurring buy limits.";
-    recColor = "text-yellow-400 font-bold";
-    recBg = "bg-yellow-950/40 border-yellow-800/40";
-  } else {
-    recommendation = "Sell / Reduce";
-    recommendationDetail = "Index metrics indicate intense extreme greed and overbought resistance bounds. Consider pausing purchases or realizing tactical yield.";
-    recColor = "text-teal-400 font-bold";
-    recBg = "bg-teal-950/40 border-teal-800/40";
-  }
-
-  // Sentiment Helper styles
-  const getFngColor = (val: number) => {
-    if (val < 25) return "text-red-450 bg-red-950/50 border-red-800/50";
-    if (val < 45) return "text-orange-400 bg-orange-950/50 border-orange-850/50";
-    if (val < 55) return "text-yellow-400 bg-yellow-950/50 border-yellow-800/50";
-    if (val < 75) return "text-emerald-400 bg-emerald-950/50 border-emerald-900/50";
-    return "text-teal-400 bg-teal-950/50 border-teal-900/50";
-  };
-
-  // ----------------------------------------------------
-  // Predictive Price Projections Models
-  // Based on Consensus & Historical Cycle Models
-  // ----------------------------------------------------
-  const baselineUSD = priceData ? priceData.USD.livePrice : 67000;
-  
   // Method multiplier algorithms
   const multipliers = {
     conservative: { daily: 1.0003, weekly: 1.0018, monthly: 1.011, annual: 1.15, halving4yr: 1.75 },
@@ -789,6 +868,130 @@ export default function App() {
     }
   };
 
+  // Calculators logic
+  const calcSymbol = calcCurrency === "USD" ? "$" : "A$";
+
+  const calcInvestAmount = calcInputMode === "fiat" ? investAmount : (calcBtcAmount * calcEntryPrice);
+  const totalBtcHoldings = calcInputMode === "fiat" ? (investAmount / calcEntryPrice) : calcBtcAmount;
+  const targetExitValue = totalBtcHoldings * calcExitPrice;
+  const netProfit = targetExitValue - calcInvestAmount;
+  const roiPercentage = calcInvestAmount > 0 ? (netProfit / calcInvestAmount) * 100 : 0;
+
+  // DCA Model Calculations
+  const activeCalcLivePrice = priceData ? priceData[calcCurrency].livePrice : (calcCurrency === "USD" ? 58300 : 88033);
+  const dcaMultiplier = multipliers[projectionMethod][dcaDurationYears >= 4 ? "halving4yr" : "annual"];
+  const dcaAvgCostBasis = activeCalcLivePrice * (1 + (dcaMultiplier - 1) * 0.45);
+  const dcaTotalPeriods = (dcaFrequency === "weekly" ? 52 : 12) * dcaDurationYears;
+  const dcaTotalInvested = dcaPeriodicAmount * dcaTotalPeriods;
+  const dcaAccumulatedBtc = dcaTotalInvested / (dcaAvgCostBasis > 0 ? dcaAvgCostBasis : activeCalcLivePrice);
+  const dcaProjectedExitPrice = activeCalcLivePrice * dcaMultiplier;
+  const dcaProjectedVal = dcaAccumulatedBtc * dcaProjectedExitPrice;
+  const dcaNetProfit = dcaProjectedVal - dcaTotalInvested;
+  const dcaRoiPercentage = dcaTotalInvested > 0 ? (dcaNetProfit / dcaTotalInvested) * 100 : 0;
+
+  // ----------------------------------------------------
+  // Nexus Quant Multi-Factor Engine
+  // ----------------------------------------------------
+  const fngScore = fngData?.value || 50;
+  const change24hVal = activeStats.change24h;
+
+  // 1. Cycle Progression Metric (Halving #4: Apr 19, 2024)
+  const halvingDate = new Date("2024-04-19T00:00:00Z").getTime();
+  const daysSinceHalving = Math.max(0, (Date.now() - halvingDate) / (1000 * 60 * 60 * 24));
+  const cycleMaxDays = 1460;
+  const daysInCycle = Math.round(daysSinceHalving % cycleMaxDays);
+  
+  let cycleHeat = 50;
+  let cycleStageName = "Expansion";
+  if (daysInCycle < 200) {
+    cycleHeat = 30; // Early post-halving consolidation
+    cycleStageName = "Early Accumulation";
+  } else if (daysInCycle < 550) {
+    cycleHeat = 30 + ((daysInCycle - 200) / 350) * 55; // Mid-cycle expansion (30 -> 85)
+    cycleStageName = "Bull Run Expansion";
+  } else if (daysInCycle < 950) {
+    cycleHeat = 85 - ((daysInCycle - 550) / 400) * 65; // Bear cycle cooldown (85 -> 20)
+    cycleStageName = "Macro Cooldown";
+  } else {
+    cycleHeat = 20 + ((daysInCycle - 950) / 510) * 20; // Pre-halving accumulation (20 -> 40)
+    cycleStageName = "Pre-Halving Recovery";
+  }
+
+  // 2. Relative Valuation Model (Mayer Multiple Proxy relative to 200WMA trend)
+  const currentLivePriceUsd = priceData ? priceData.USD.livePrice : 65000;
+  // Fundamental 200WMA baseline estimated at ~$52k base at 2024 halving with steady 4-year doubling
+  const baseLine200wma = 52000 * Math.pow(2.0, daysSinceHalving / 1460); 
+  const mayerMultipleApprox = currentLivePriceUsd / (baseLine200wma > 0 ? baseLine200wma : 52000);
+  
+  // Mayer Multiple scaling: <0.8 is deep value (heat <25), ~1.0 is fair value (50), >2.0 is overheated (100)
+  let valuationHeat = Math.round(((mayerMultipleApprox - 0.6) / (2.0 - 0.6)) * 100);
+  valuationHeat = Math.max(10, Math.min(95, valuationHeat));
+
+  // 3. Short-Term RSI Synthetic Momentum
+  const rsiSimulated = Math.round(50 + (change24hVal * 3.5) + ((fngScore - 50) * 0.25));
+  const rsiBounded = Math.max(15, Math.min(90, rsiSimulated));
+
+  // 4. Combined Nexus Quant Score (0 - 100)
+  // Balanced weights: Sentiment (35%), Valuation (25%), Momentum (20%), Cycle (20%)
+  const totalExpertMetric = Math.round(
+    (fngScore * 0.35) + 
+    (valuationHeat * 0.25) + 
+    (rsiBounded * 0.20) + 
+    (cycleHeat * 0.20)
+  );
+
+  // EMA Baseline Signal
+  const emaSignal = currentLivePriceUsd >= baseLine200wma ? "Above 200WMA Trend" : "Below 200WMA (Deep Value)";
+  
+  // Context-Aware Strategic Classification
+  let recommendation: "Strong Buy" | "Accumulate" | "Hold" | "Trim / Take Profit";
+  let recommendationDetail = "";
+  let recColor = "";
+  let recBg = "";
+
+  if (totalExpertMetric < 32) {
+    recommendation = "Strong Buy";
+    recColor = "text-emerald-400 font-bold";
+    recBg = "bg-emerald-950/40 border-emerald-900/40";
+    recommendationDetail = fngScore < 40 
+      ? `High fear (${fngScore}) combined with deep valuation discount creates optimal asymmetric accumulation conditions.`
+      : `Macro valuation is heavily discounted relative to the 200WMA baseline, favoring aggressive long-term buyers.`;
+  } else if (totalExpertMetric <= 52) {
+    recommendation = "Accumulate";
+    recColor = "text-sky-400 font-bold";
+    recBg = "bg-sky-950/40 border-sky-900/40";
+    recommendationDetail = fngScore > 55
+      ? `Bullish momentum with ${fngScore} (${fngData?.sentiment || 'Greed'}) in an active cycle. Favorable for steady, disciplined DCA without over-allocating.`
+      : `Neutral to favorable market balance. Solid baseline for recurring weekly or monthly Dollar Cost Averaging.`;
+  } else if (totalExpertMetric <= 72) {
+    recommendation = "Hold";
+    recColor = "text-amber-400 font-bold";
+    recBg = "bg-amber-950/40 border-amber-800/40";
+    recommendationDetail = fngScore >= 65
+      ? `Elevated bullish sentiment (${fngScore} ${fngData?.sentiment || 'Greed'}). Maintain existing spot holdings; avoid chasing breakouts with high leverage.`
+      : `Market oscillators and valuation are in a balanced equilibrium. Hold current allocation and monitor resistance targets.`;
+  } else {
+    recommendation = "Trim / Take Profit";
+    recColor = "text-rose-400 font-bold";
+    recBg = "bg-rose-950/40 border-rose-900/40";
+    recommendationDetail = `Overbought conditions with extreme sentiment (${fngScore}) and extended valuation multiples. Prudent to consider rebalancing or securing tactical yield.`;
+  }
+
+  // Sentiment Helper styles
+  const getFngColor = (val: number) => {
+    if (val < 25) return "text-red-450 bg-red-950/50 border-red-800/50";
+    if (val < 45) return "text-orange-400 bg-orange-950/50 border-orange-850/50";
+    if (val < 55) return "text-yellow-400 bg-yellow-950/50 border-yellow-800/50";
+    if (val < 75) return "text-emerald-400 bg-emerald-950/50 border-emerald-900/50";
+    return "text-teal-400 bg-teal-950/50 border-teal-900/50";
+  };
+
+  // ----------------------------------------------------
+  // Predictive Price Projections Models
+  // Based on Consensus & Historical Cycle Models
+  // ----------------------------------------------------
+  const baselineUSD = priceData ? priceData.USD.livePrice : 67000;
+
   const getProjectionValue = (step: "daily" | "weekly" | "monthly" | "annual" | "halving4yr") => {
     const factor = multipliers[projectionMethod][step];
     const usdProjected = baselineUSD * factor;
@@ -797,7 +1000,7 @@ export default function App() {
       return usdProjected * priceData.fxRate;
     }
     // Static fallback coefficient if priceData hasn't loaded yet
-    return currency === "AUD" ? usdProjected * 1.51 : usdProjected;
+    return currency === "AUD" ? usdProjected * (priceData?.fxRate || 1.40) : usdProjected;
   };
 
   const getProjectionBottomValue = (step: "daily" | "weekly" | "monthly" | "annual" | "halving4yr") => {
@@ -808,7 +1011,7 @@ export default function App() {
       return usdProjected * priceData.fxRate;
     }
     // Static fallback coefficient if priceData hasn't loaded yet
-    return currency === "AUD" ? usdProjected * 1.51 : usdProjected;
+    return currency === "AUD" ? usdProjected * (priceData?.fxRate || 1.40) : usdProjected;
   };
 
   // Dynamic Chart Data mapping supporting ultra-responsive 1D intraday simulation
@@ -1025,7 +1228,7 @@ export default function App() {
             </span>
             <span className="text-slate-600">|</span>
             <span className="text-slate-350">
-              AUD conversion peg: <strong className="text-white">1 USD = {priceData ? priceData.fxRate.toFixed(4) : "1.5130"} AUD</strong>
+              AUD conversion peg: <strong className="text-white">1 USD = {priceData ? priceData.fxRate.toFixed(4) : "1.3946"} AUD</strong>
             </span>
           </div>
           <div className="hidden md:flex items-center gap-4 text-slate-500">
@@ -1191,7 +1394,7 @@ export default function App() {
                         tickLine={false}
                         axisLine={false}
                         domain={["auto", "auto"]}
-                        tickFormatter={(val) => `${currentSymbol}${Math.round(val / 1000)}k`}
+                        tickFormatter={(val) => val >= 1000000 ? `${currentSymbol}${(val / 1000000).toFixed(1)}M` : `${currentSymbol}${Math.round(val / 1000)}k`}
                       />
                       <Tooltip content={<CustomChartTooltip />} />
 
@@ -1244,7 +1447,7 @@ export default function App() {
                   <Info className="w-3.5 h-3.5 text-blue-400" />
                   <span>Hover to analyze localized daily close values. Currency toggle converts datasets instantly.</span>
                 </span>
-                <span className="font-mono text-[9px]">FX CORE: {priceData ? priceData.fxRate.toFixed(4) : "1.51"}</span>
+                <span className="font-mono text-[9px]">FX CORE: {priceData ? priceData.fxRate.toFixed(4) : "1.3946"}</span>
               </div>
             </div>
 
@@ -1262,14 +1465,36 @@ export default function App() {
                   <Brain className="w-5 h-5 text-blue-400" />
                   <h4 className="font-bold text-slate-100 text-sm">Dynamic Volatility Analysis</h4>
                 </div>
-                <button
-                  onClick={fetchVolatilityAnalysis}
-                  disabled={loadingVolatility}
-                  className="p-1 rounded bg-slate-800 text-gray-400 hover:text-white cursor-pointer transition disabled:opacity-50"
-                  title="Force AI Refresh"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${loadingVolatility ? 'animate-spin' : ''}`} />
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={copyVolatilityReport}
+                    disabled={!volatilityAnalysis || loadingVolatility}
+                    className="p-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 hover:text-white cursor-pointer transition disabled:opacity-50 text-[10px] flex items-center gap-1"
+                    title="Copy AI Briefing to Clipboard"
+                  >
+                    {copiedVolatility ? (
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                  <button
+                    onClick={downloadVolatilityMarkdown}
+                    disabled={!volatilityAnalysis || loadingVolatility}
+                    className="p-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 hover:text-white cursor-pointer transition disabled:opacity-50 text-[10px] flex items-center gap-1"
+                    title="Download Briefing as Markdown (.md)"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={fetchVolatilityAnalysis}
+                    disabled={loadingVolatility}
+                    className="p-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 hover:text-white cursor-pointer transition disabled:opacity-50"
+                    title="Force AI Refresh"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${loadingVolatility ? 'animate-spin' : ''}`} />
+                  </button>
+                </div>
               </div>
 
               <p className="text-xs text-slate-400 mb-4 leading-relaxed">
@@ -1496,6 +1721,64 @@ export default function App() {
               <span>Model Calibration Version: STF LOG v1.19</span>
               <span className="uppercase text-slate-400">Values calibrated to real current live rate of {currentSymbol}{Math.round(currentLivePrice).toLocaleString()}</span>
             </div>
+
+            {/* 12-Month Tactical Forward Projections */}
+            <div className="mt-8 pt-6 border-t border-slate-850/60">
+              <div className="flex items-center gap-2 mb-4">
+                <Calendar className="w-5 h-5 text-indigo-400" />
+                <h4 className="font-bold text-sm text-slate-100">12-Month Tactical Forward Projections</h4>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
+                {Array.from({ length: 12 }).map((_, i) => {
+                  const mIndex = i + 1;
+                  const d = new Date();
+                  d.setMonth(d.getMonth() + mIndex);
+                  const monthName = d.toLocaleString('default', { month: 'short' });
+                  const year = d.getFullYear();
+                  
+                  const methodMulti = multipliers[projectionMethod];
+                  const floorMulti = floorMultipliers[projectionMethod];
+                  
+                  const progress = mIndex === 1 ? 0 : Math.pow((mIndex - 1) / 11, 0.85);
+                  const peakFactor = methodMulti.monthly + (methodMulti.annual - methodMulti.monthly) * progress;
+                  const floorFactor = floorMulti.monthly + (floorMulti.annual - floorMulti.monthly) * progress;
+                  
+                  const usdPeak = baselineUSD * peakFactor;
+                  const usdFloor = baselineUSD * floorFactor;
+                  const peak = currency === "AUD" ? usdPeak * (priceData?.fxRate || 1.40) : usdPeak;
+                  const floor = currency === "AUD" ? usdFloor * (priceData?.fxRate || 1.40) : usdFloor;
+                  
+                  const peakGainPct = (peakFactor - 1) * 100;
+                  const floorGainPct = (floorFactor - 1) * 100;
+                  
+                  return (
+                    <div key={mIndex} className="bg-slate-950/70 p-3 rounded-xl border border-slate-900 flex flex-col justify-between">
+                      <div className="text-[10px] text-slate-400 font-bold tracking-wider mb-2">{monthName} <span className="text-slate-500">{year}</span></div>
+                      <div className="space-y-1.5">
+                        <div className="flex flex-col">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[9px] text-slate-500 font-mono">Peak</span>
+                            <span className="text-[9px] text-emerald-400 font-mono">+{peakGainPct.toFixed(1)}%</span>
+                          </div>
+                          <span className="text-[13px] font-bold text-emerald-400 font-mono">
+                            {currentSymbol}{Math.round(peak).toLocaleString()}
+                          </span>
+                        </div>
+                        <div className="flex flex-col border-t border-slate-900 pt-1.5">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[9px] text-slate-500 font-mono">Floor</span>
+                            <span className="text-[9px] text-red-400 font-mono">{floorGainPct.toFixed(1)}%</span>
+                          </div>
+                          <span className="text-[13px] font-bold text-slate-300 font-mono">
+                            {currentSymbol}{Math.round(floor).toLocaleString()}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           </div>
 
         </div>
@@ -1630,27 +1913,33 @@ export default function App() {
 
                   {/* Rating Indicator Bar */}
                   <div className="w-full text-left space-y-1">
-                    <div className="flex justify-between text-[9px] text-slate-500 font-mono">
-                      <span>Score: {totalExpertMetric}/100</span>
+                    <div className="flex justify-between text-[9px] text-slate-400 font-mono">
+                      <span>Quant Index</span>
+                      <span className="font-bold text-white">{totalExpertMetric} / 100</span>
                     </div>
                     
                     {/* Multilevel bar */}
                     <div className="h-1.5 w-full bg-slate-900 rounded-full overflow-hidden flex">
-                      <div className="h-full bg-red-500" style={{ width: "35%" }}></div>
-                      <div className="h-full bg-emerald-500" style={{ width: "20%" }}></div>
-                      <div className="h-full bg-yellow-500" style={{ width: "20%" }}></div>
-                      <div className="h-full bg-teal-500" style={{ width: "25%" }}></div>
+                      <div className="h-full bg-emerald-500" style={{ width: "32%" }} title="Strong Buy (0-32)"></div>
+                      <div className="h-full bg-sky-500" style={{ width: "20%" }} title="Accumulate (33-52)"></div>
+                      <div className="h-full bg-amber-500" style={{ width: "20%" }} title="Hold (53-72)"></div>
+                      <div className="h-full bg-rose-500" style={{ width: "28%" }} title="Trim / Take Profit (73-100)"></div>
                     </div>
-
                     <div className="relative h-1.5 w-full">
                       <span 
-                        className="absolute -top-2.5 w-0.5 h-2.5 bg-white border border-black shadow"
-                        style={{ left: `${totalExpertMetric}%` }}
+                        className="absolute -top-2.5 w-1 h-3 bg-white border border-black rounded-sm shadow"
+                        style={{ left: `${Math.min(98, Math.max(2, totalExpertMetric))}%` }}
                       ></span>
+                    </div>
+                    <div className="flex justify-between text-[8px] text-slate-500 font-mono pt-0.5">
+                      <span className="text-emerald-400">Buy</span>
+                      <span className="text-sky-400">DCA</span>
+                      <span className="text-amber-400">Hold</span>
+                      <span className="text-rose-400">Trim</span>
                     </div>
                   </div>
 
-                  <p className="text-[10px] text-slate-300 leading-normal italic border-t border-slate-900 pt-2">
+                  <p className="text-[10px] text-slate-300 leading-normal italic border-t border-slate-900 pt-2 text-left">
                     "{recommendationDetail}"
                   </p>
                 </div>
@@ -1660,25 +1949,33 @@ export default function App() {
               <div className="space-y-1.5 text-[10px]">
                 {/* Fear and Greed Component */}
                 <div className="flex items-center justify-between p-1.5 rounded bg-slate-950/40 border border-slate-900/80">
-                  <span className="text-slate-400">Fear & Greed Alignment</span>
+                  <span className="text-slate-400">Fear & Greed (35%)</span>
                   <span className={`font-mono font-bold uppercase text-[9px] ${getFngColor(fngScore)}`}>
-                    {fngScore}
+                    {fngScore} ({fngData?.sentiment || 'Neutral'})
                   </span>
                 </div>
 
-                {/* RSI Indicator */}
+                {/* Macro Valuation Component */}
                 <div className="flex items-center justify-between p-1.5 rounded bg-slate-950/40 border border-slate-900/80">
-                  <span className="text-slate-400">Simulated RSI</span>
-                  <span className="font-mono text-slate-100 font-medium">
+                  <span className="text-slate-400">200WMA Valuation (25%)</span>
+                  <span className="font-mono text-slate-200 font-medium text-[9px]">
+                    {mayerMultipleApprox.toFixed(2)}x ({valuationHeat < 35 ? "Discount" : valuationHeat > 70 ? "Premium" : "Fair Value"})
+                  </span>
+                </div>
+
+                {/* Cycle Stage */}
+                <div className="flex items-center justify-between p-1.5 rounded bg-slate-950/40 border border-slate-900/80">
+                  <span className="text-slate-400">Cycle Phase (20%)</span>
+                  <span className="font-mono text-emerald-400 font-medium text-[9px]">
+                    {cycleStageName} ({daysInCycle}d)
+                  </span>
+                </div>
+
+                {/* RSI Momentum */}
+                <div className="flex items-center justify-between p-1.5 rounded bg-slate-950/40 border border-slate-900/80">
+                  <span className="text-slate-400">RSI Momentum (20%)</span>
+                  <span className="font-mono text-slate-200 font-medium text-[9px]">
                     {rsiBounded} / 100
-                  </span>
-                </div>
-
-                {/* EMA Supporting Floor */}
-                <div className="flex items-center justify-between p-1.5 rounded bg-slate-950/40 border border-slate-900/80">
-                  <span className="text-slate-400">EMA 200 Support</span>
-                  <span className="text-blue-400 font-mono font-bold uppercase text-[9px]">
-                    {emaSignal}
                   </span>
                 </div>
               </div>
@@ -1690,24 +1987,54 @@ export default function App() {
         {/* Row 4: Target Scenario & Profit Calculator (Full Width!) */}
         <div className="mt-6">
           
-          {/* Tactical Scenario Profit and Loss Calculator */}
+          {/* Tactical Scenario Profit and Loss Calculator & DCA Engine */}
           <div className="bg-slate-900/45 border border-slate-850/80 rounded-2xl p-6 shadow-xl relative">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-5 pb-4 border-b border-slate-850/60">
               <div className="flex items-center gap-2.5">
                 <Calculator className="w-5 h-5 text-emerald-400 animate-pulse" />
                 <div>
                   <div className="flex items-center gap-2">
-                    <h4 className="font-bold text-slate-100 text-sm">Target Scenario & Profit Calculator</h4>
+                    <h4 className="font-bold text-slate-100 text-sm">
+                      {calcTab === "scenario" ? "Target Scenario & Profit Calculator" : "Disciplined DCA Accumulation Planner"}
+                    </h4>
                     <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded text-[10px] font-medium flex items-center gap-1">
                       <Check className="w-3 h-3 text-emerald-400" />
                       Saved & Remembered
                     </span>
                   </div>
-                  <p className="text-xs text-slate-400">Simulate investment growth across customized purchase levels and future market cycles.</p>
+                  <p className="text-xs text-slate-400">
+                    {calcTab === "scenario"
+                      ? "Simulate investment growth across customized purchase levels and future market cycles."
+                      : "Model recurring weekly or monthly Bitcoin accumulation with institutional cycle forecasting."}
+                  </p>
                 </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-2 shrink-0">
+                {/* Calculator Mode Switcher */}
+                <div className="inline-flex bg-slate-950 p-1 rounded-xl border border-slate-800" title="Calculator Engine">
+                  <button
+                    onClick={() => setCalcTab("scenario")}
+                    className={`px-3 py-1.5 text-[11px] rounded-lg cursor-pointer transition font-bold ${
+                      calcTab === "scenario"
+                        ? "bg-slate-900 text-emerald-400 border border-slate-800/80 shadow-md"
+                        : "text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    Target Scenario
+                  </button>
+                  <button
+                    onClick={() => setCalcTab("dca")}
+                    className={`px-3 py-1.5 text-[11px] rounded-lg cursor-pointer transition font-bold ${
+                      calcTab === "dca"
+                        ? "bg-slate-900 text-emerald-400 border border-slate-800/80 shadow-md"
+                        : "text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    DCA Accumulator
+                  </button>
+                </div>
+
                 {/* Currency Toggle */}
                 <div className="inline-flex bg-slate-950 p-1 rounded-xl border border-slate-800" title="Calculator Currency">
                   {(["USD", "AUD"] as const).map((ccy) => (
@@ -1725,200 +2052,358 @@ export default function App() {
                   ))}
                 </div>
 
-                {/* Input Mode Toggle */}
-                <div className="inline-flex bg-slate-950 p-1 rounded-xl border border-slate-800" title="Input Parameter">
+                {calcTab === "scenario" && (
+                  /* Input Mode Toggle */
+                  <div className="inline-flex bg-slate-950 p-1 rounded-xl border border-slate-800" title="Input Parameter">
+                    <button
+                      onClick={() => setCalcInputMode("fiat")}
+                      className={`px-3 py-1.5 text-[11px] rounded-lg cursor-pointer transition font-bold ${
+                        calcInputMode === "fiat"
+                          ? "bg-slate-900 text-emerald-400 border border-slate-800/80 shadow-md"
+                          : "text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      Fiat Amount
+                    </button>
+                    <button
+                      onClick={() => setCalcInputMode("btc")}
+                      className={`px-3 py-1.5 text-[11px] rounded-lg cursor-pointer transition font-bold ${
+                        calcInputMode === "btc"
+                          ? "bg-slate-900 text-emerald-400 border border-slate-800/80 shadow-md"
+                          : "text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      Holdings (BTC)
+                    </button>
+                  </div>
+                )}
+
+                {calcTab === "dca" && (
                   <button
-                    onClick={() => setCalcInputMode("fiat")}
-                    className={`px-3 py-1.5 text-[11px] rounded-lg cursor-pointer transition font-bold ${
-                      calcInputMode === "fiat"
-                        ? "bg-slate-900 text-emerald-400 border border-slate-800/80 shadow-md"
-                        : "text-slate-400 hover:text-slate-200"
-                    }`}
+                    onClick={downloadDcaCsv}
+                    className="px-3 py-1.5 text-[11px] rounded-xl bg-slate-950 hover:bg-slate-850 border border-slate-800 text-emerald-400 hover:text-emerald-300 font-bold flex items-center gap-1.5 cursor-pointer transition"
+                    title="Export DCA Plan to CSV spreadsheet"
                   >
-                    Fiat Amount
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Export CSV</span>
                   </button>
-                  <button
-                    onClick={() => setCalcInputMode("btc")}
-                    className={`px-3 py-1.5 text-[11px] rounded-lg cursor-pointer transition font-bold ${
-                      calcInputMode === "btc"
-                        ? "bg-slate-900 text-emerald-400 border border-slate-800/80 shadow-md"
-                        : "text-slate-400 hover:text-slate-200"
-                    }`}
-                  >
-                    Holdings (BTC)
-                  </button>
-                </div>
+                )}
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {calcTab === "scenario" ? (
+              /* Scenario Target Calculator View */
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
 
-              {/* Left Side Inputs */}
-              <div className="md:col-span-2 space-y-4">
-                {calcInputMode === "fiat" ? (
-                  /* Total Principal Input */
+                {/* Left Side Inputs */}
+                <div className="md:col-span-2 space-y-4">
+                  {calcInputMode === "fiat" ? (
+                    /* Total Principal Input */
+                    <div>
+                      <div className="flex justify-between items-center text-xs mb-1.5">
+                        <span className="text-slate-400">Scenario Capital Invested ({calcCurrency})</span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-slate-500 font-mono text-[10px]">{calcSymbol}</span>
+                          <input
+                            type="number"
+                            value={investAmount}
+                            onChange={(e) => setInvestAmount(Math.max(0, Number(e.target.value)))}
+                            className="w-24 bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5 text-white font-mono text-xs text-right focus:border-slate-700 focus:outline-none"
+                          />
+                        </div>
+                      </div>
+                      <input
+                        type="range"
+                        min={calcCurrency === "USD" ? "100" : "150"}
+                        max={calcCurrency === "USD" ? "100000" : "150000"}
+                        step="500"
+                        value={investAmount}
+                        onChange={(e) => setInvestAmount(Number(e.target.value))}
+                        className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                      />
+                      <div className="flex justify-between text-[10px] text-slate-500 mt-1">
+                        <span>{calcSymbol}{calcCurrency === "USD" ? "100" : "150"}</span>
+                        <span>{calcSymbol}{calcCurrency === "USD" ? "50,000" : "75,500"}</span>
+                        <span>{calcSymbol}{calcCurrency === "USD" ? "100,000" : "150,000"}</span>
+                      </div>
+                    </div>
+                  ) : (
+                    /* Bitcoin holdings mode input */
+                    <div>
+                      <div className="flex justify-between items-center text-xs mb-1.5">
+                        <span className="text-slate-400">Enter Target Bitcoin Quantity</span>
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="number"
+                            step="0.005"
+                            value={calcBtcAmount}
+                            onChange={(e) => setCalcBtcAmount(Math.max(0, Number(e.target.value)))}
+                            className="w-24 bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5 text-white font-mono text-xs text-right focus:border-slate-700 focus:outline-none"
+                          />
+                          <span className="text-slate-400 font-mono text-[11px] font-bold">BTC</span>
+                        </div>
+                      </div>
+                      <input
+                        type="range"
+                        min="0.001"
+                        max="5"
+                        step="0.005"
+                        value={calcBtcAmount}
+                        onChange={(e) => setCalcBtcAmount(Number(e.target.value))}
+                        className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                      />
+                      <div className="flex justify-between text-[10px] text-slate-500 mt-1 font-mono">
+                        <span>0.001 BTC</span>
+                        <span>2.50 BTC</span>
+                        <span>5.00 BTC</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Entry Price Point Target */}
                   <div>
                     <div className="flex justify-between items-center text-xs mb-1.5">
-                      <span className="text-slate-400">Scenario Capital Invested ({calcCurrency})</span>
+                      <span className="text-slate-400">Proposed Purchase Entry Price ({calcCurrency})</span>
                       <div className="flex items-center gap-1.5">
                         <span className="text-slate-500 font-mono text-[10px]">{calcSymbol}</span>
                         <input
                           type="number"
-                          value={investAmount}
-                          onChange={(e) => setInvestAmount(Math.max(0, Number(e.target.value)))}
+                          value={calcEntryPrice}
+                          onChange={(e) => setCalcEntryPrice(Math.max(1, Number(e.target.value)))}
                           className="w-24 bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5 text-white font-mono text-xs text-right focus:border-slate-700 focus:outline-none"
                         />
                       </div>
                     </div>
                     <input
                       type="range"
-                      min={calcCurrency === "USD" ? "100" : "150"}
-                      max={calcCurrency === "USD" ? "100000" : "150000"}
-                      step="500"
-                      value={investAmount}
-                      onChange={(e) => setInvestAmount(Number(e.target.value))}
+                      min={calcCurrency === "USD" ? "10000" : "15000"}
+                      max={calcCurrency === "USD" ? "150000" : "225000"}
+                      step="1000"
+                      value={calcEntryPrice}
+                      onChange={(e) => setCalcEntryPrice(Number(e.target.value))}
+                      className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
+                    />
+                    <div className="flex justify-between text-[10px] text-slate-500 mt-1">
+                      <span>{calcSymbol}{calcCurrency === "USD" ? "10,000" : "15,000"}</span>
+                      {priceData && (
+                        <span>Current (~{calcSymbol}{Math.round(priceData[calcCurrency].livePrice).toLocaleString()})</span>
+                      )}
+                      <span>{calcSymbol}{calcCurrency === "USD" ? "150,000" : "225,000"}</span>
+                    </div>
+                  </div>
+
+                  {/* Future Target Exit Point */}
+                  <div>
+                    <div className="flex justify-between items-center text-xs mb-1.5">
+                      <span className="text-slate-400">Tactical Portfolio Exit Price ({calcCurrency})</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-slate-500 font-mono text-[10px]">{calcSymbol}</span>
+                        <input
+                          type="number"
+                          value={calcExitPrice}
+                          onChange={(e) => setCalcExitPrice(Math.max(1, Number(e.target.value)))}
+                          className="w-24 bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5 text-white font-mono text-xs text-right focus:border-slate-700 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                    <input
+                      type="range"
+                      min={calcCurrency === "USD" ? "20000" : "30000"}
+                      max={calcCurrency === "USD" ? "350000" : "530000"}
+                      step="5000"
+                      value={calcExitPrice}
+                      onChange={(e) => setCalcExitPrice(Number(e.target.value))}
+                      className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
+                    />
+                    <div className="flex justify-between text-[10px] text-slate-500 mt-1">
+                      <span>{calcSymbol}{calcCurrency === "USD" ? "20,000" : "30,000"}</span>
+                      <span>{calcSymbol}{calcCurrency === "USD" ? "150,000" : "225,050"}</span>
+                      <span>{calcSymbol}{calcCurrency === "USD" ? "350,000" : "530,000"}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Right Side Instant ROI Output */}
+                <div className="bg-slate-950/80 p-5 rounded-xl border border-slate-800 flex flex-col justify-between space-y-4">
+                  <div>
+                    <span className="text-[10px] uppercase tracking-wider text-slate-500 block mb-1 font-bold">Position Summary</span>
+                    <div className="space-y-2">
+                      <div className="flex justify-between text-xs border-b border-slate-900/60 pb-1">
+                        <span className="text-slate-400">Scenario Fiat Capital:</span>
+                        <span className="font-mono text-white font-bold">{calcSymbol}{Math.round(calcInvestAmount).toLocaleString()}</span>
+                      </div>
+                      <div className="flex justify-between text-xs border-b border-slate-900/60 pb-1">
+                        <span className="text-slate-400">Estimated BTC Owned:</span>
+                        <span className="font-mono text-white font-bold">{totalBtcHoldings.toFixed(6)}</span>
+                      </div>
+                      <div className="flex justify-between text-xs border-b border-slate-900/60 pb-1">
+                        <span className="text-slate-400">Target Value ({calcCurrency}):</span>
+                        <span className="font-mono text-white font-bold">{calcSymbol}{targetExitValue.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="pt-2 border-t border-slate-850">
+                    <span className="text-[10px] uppercase tracking-wider text-slate-500 block mb-1 font-bold">Projected Net ROI ({calcCurrency})</span>
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-1">
+                        <span className={`text-xl sm:text-2xl font-mono font-extrabold ${netProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                          {netProfit >= 0 ? "+" : ""}
+                          {calcSymbol}{Math.round(netProfit).toLocaleString()}
+                        </span>
+                      </div>
+                      <div className={`text-xs inline-flex items-center gap-1 font-bold ${netProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                        <ArrowUpRight className="w-3.5 h-3.5" />
+                        <span>{roiPercentage.toFixed(1)}% Potential Yield</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+            ) : (
+              /* Recurring DCA Accumulator View */
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+
+                {/* Left Side Inputs for DCA */}
+                <div className="md:col-span-2 space-y-4">
+                  {/* Contribution Frequency */}
+                  <div>
+                    <span className="block text-xs text-slate-400 mb-1.5">Contribution Frequency</span>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        onClick={() => setDcaFrequency("weekly")}
+                        className={`p-2.5 rounded-xl border text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
+                          dcaFrequency === "weekly"
+                            ? "bg-slate-950 border-emerald-500/50 text-emerald-400 shadow-md"
+                            : "bg-slate-950/50 border-slate-850 text-slate-400 hover:text-white"
+                        }`}
+                      >
+                        <Calendar className="w-4 h-4" />
+                        <span>Weekly (52x / Year)</span>
+                      </button>
+                      <button
+                        onClick={() => setDcaFrequency("monthly")}
+                        className={`p-2.5 rounded-xl border text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
+                          dcaFrequency === "monthly"
+                            ? "bg-slate-950 border-emerald-500/50 text-emerald-400 shadow-md"
+                            : "bg-slate-950/50 border-slate-850 text-slate-400 hover:text-white"
+                        }`}
+                      >
+                        <Calendar className="w-4 h-4" />
+                        <span>Monthly (12x / Year)</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Periodic Budget Slider */}
+                  <div>
+                    <div className="flex justify-between items-center text-xs mb-1.5">
+                      <span className="text-slate-400">Periodic Contribution ({calcCurrency})</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-slate-500 font-mono text-[10px]">{calcSymbol}</span>
+                        <input
+                          type="number"
+                          value={dcaPeriodicAmount}
+                          onChange={(e) => setDcaPeriodicAmount(Math.max(10, Number(e.target.value)))}
+                          className="w-24 bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5 text-white font-mono text-xs text-right focus:border-slate-700 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                    <input
+                      type="range"
+                      min={calcCurrency === "USD" ? "10" : "15"}
+                      max={calcCurrency === "USD" ? "2000" : "3000"}
+                      step={calcCurrency === "USD" ? "10" : "15"}
+                      value={dcaPeriodicAmount}
+                      onChange={(e) => setDcaPeriodicAmount(Number(e.target.value))}
                       className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-emerald-500"
                     />
                     <div className="flex justify-between text-[10px] text-slate-500 mt-1">
-                      <span>{calcSymbol}{calcCurrency === "USD" ? "100" : "150"}</span>
-                      <span>{calcSymbol}{calcCurrency === "USD" ? "50,000" : "75,500"}</span>
-                      <span>{calcSymbol}{calcCurrency === "USD" ? "100,000" : "150,000"}</span>
+                      <span>{calcSymbol}{calcCurrency === "USD" ? "10" : "15"} / period</span>
+                      <span>{calcSymbol}{calcCurrency === "USD" ? "500" : "750"} / period</span>
+                      <span>{calcSymbol}{calcCurrency === "USD" ? "2,000" : "3,000"} / period</span>
                     </div>
                   </div>
-                ) : (
-                  /* Bitcoin holdings mode input */
+
+                  {/* Accumulation Horizon */}
                   <div>
-                    <div className="flex justify-between items-center text-xs mb-1.5">
-                      <span className="text-slate-400">Enter Target Bitcoin Quantity</span>
-                      <div className="flex items-center gap-1.5">
-                        <input
-                          type="number"
-                          step="0.005"
-                          value={calcBtcAmount}
-                          onChange={(e) => setCalcBtcAmount(Math.max(0, Number(e.target.value)))}
-                          className="w-24 bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5 text-white font-mono text-xs text-right focus:border-slate-700 focus:outline-none"
-                        />
-                        <span className="text-slate-400 font-mono text-[11px] font-bold">BTC</span>
-                      </div>
-                    </div>
-                    <input
-                      type="range"
-                      min="0.001"
-                      max="5"
-                      step="0.005"
-                      value={calcBtcAmount}
-                      onChange={(e) => setCalcBtcAmount(Number(e.target.value))}
-                      className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-emerald-500"
-                    />
-                    <div className="flex justify-between text-[10px] text-slate-500 mt-1 font-mono">
-                      <span>0.001 BTC</span>
-                      <span>2.50 BTC</span>
-                      <span>5.00 BTC</span>
-                    </div>
-                  </div>
-                )}
-
-                {/* Entry Price Point Target */}
-                <div>
-                  <div className="flex justify-between items-center text-xs mb-1.5">
-                    <span className="text-slate-400">Proposed Purchase Entry Price ({calcCurrency})</span>
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-slate-500 font-mono text-[10px]">{calcSymbol}</span>
-                      <input
-                        type="number"
-                        value={calcEntryPrice}
-                        onChange={(e) => setCalcEntryPrice(Math.max(1, Number(e.target.value)))}
-                        className="w-24 bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5 text-white font-mono text-xs text-right focus:border-slate-700 focus:outline-none"
-                      />
-                    </div>
-                  </div>
-                  <input
-                    type="range"
-                    min={calcCurrency === "USD" ? "10000" : "15000"}
-                    max={calcCurrency === "USD" ? "150000" : "225000"}
-                    step="1000"
-                    value={calcEntryPrice}
-                    onChange={(e) => setCalcEntryPrice(Number(e.target.value))}
-                    className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
-                  />
-                  <div className="flex justify-between text-[10px] text-slate-500 mt-1">
-                    <span>{calcSymbol}{calcCurrency === "USD" ? "10,000" : "15,000"}</span>
-                    {priceData && (
-                      <span>Current (~{calcSymbol}{Math.round(priceData[calcCurrency].livePrice).toLocaleString()})</span>
-                    )}
-                    <span>{calcSymbol}{calcCurrency === "USD" ? "150,000" : "225,000"}</span>
-                  </div>
-                </div>
-
-                {/* Future Target Exit Point */}
-                <div>
-                  <div className="flex justify-between items-center text-xs mb-1.5">
-                    <span className="text-slate-400">Tactical Portfolio Exit Price ({calcCurrency})</span>
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-slate-500 font-mono text-[10px]">{calcSymbol}</span>
-                      <input
-                        type="number"
-                        value={calcExitPrice}
-                        onChange={(e) => setCalcExitPrice(Math.max(1, Number(e.target.value)))}
-                        className="w-24 bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5 text-white font-mono text-xs text-right focus:border-slate-700 focus:outline-none"
-                      />
-                    </div>
-                  </div>
-                  <input
-                    type="range"
-                    min={calcCurrency === "USD" ? "20000" : "30000"}
-                    max={calcCurrency === "USD" ? "350000" : "530000"}
-                    step="5000"
-                    value={calcExitPrice}
-                    onChange={(e) => setCalcExitPrice(Number(e.target.value))}
-                    className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
-                  />
-                  <div className="flex justify-between text-[10px] text-slate-500 mt-1">
-                    <span>{calcSymbol}{calcCurrency === "USD" ? "20,000" : "30,000"}</span>
-                    <span>{calcSymbol}{calcCurrency === "USD" ? "150,000" : "225,050"}</span>
-                    <span>{calcSymbol}{calcCurrency === "USD" ? "350,000" : "530,000"}</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Right Side Instant ROI Output */}
-              <div className="bg-slate-950/80 p-5 rounded-xl border border-slate-800 flex flex-col justify-between space-y-4">
-                <div>
-                  <span className="text-[10px] uppercase tracking-wider text-slate-500 block mb-1 font-bold">Position Summary</span>
-                  <div className="space-y-2">
-                    <div className="flex justify-between text-xs border-b border-slate-900/60 pb-1">
-                      <span className="text-slate-400">Scenario Fiat Capital:</span>
-                      <span className="font-mono text-white font-bold">{calcSymbol}{Math.round(calcInvestAmount).toLocaleString()}</span>
-                    </div>
-                    <div className="flex justify-between text-xs border-b border-slate-900/60 pb-1">
-                      <span className="text-slate-400">Estimated BTC Owned:</span>
-                      <span className="font-mono text-white font-bold">{totalBtcHoldings.toFixed(6)}</span>
-                    </div>
-                    <div className="flex justify-between text-xs border-b border-slate-900/60 pb-1">
-                      <span className="text-slate-400">Target Value ({calcCurrency}):</span>
-                      <span className="font-mono text-white font-bold">{calcSymbol}{targetExitValue.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
+                    <span className="block text-xs text-slate-400 mb-1.5">Accumulation Horizon & Halving Cycle</span>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { years: 1, label: "1 Year", desc: "Short Horizon" },
+                        { years: 2, label: "2 Years", desc: "Mid Cycle" },
+                        { years: 4, label: "4 Years", desc: "Full Halving Epoch" }
+                      ].map((item) => (
+                        <button
+                          key={item.years}
+                          onClick={() => setDcaDurationYears(item.years)}
+                          className={`p-2.5 rounded-xl border text-center transition cursor-pointer ${
+                            dcaDurationYears === item.years
+                              ? "bg-slate-950 border-emerald-500/50 text-white shadow-md"
+                              : "bg-slate-950/50 border-slate-850 text-slate-400 hover:text-white"
+                          }`}
+                        >
+                          <span className="block text-xs font-bold text-slate-200">{item.label}</span>
+                          <span className="block text-[9px] text-emerald-400 font-mono mt-0.5">{item.desc}</span>
+                        </button>
+                      ))}
                     </div>
                   </div>
                 </div>
 
-                <div className="pt-2 border-t border-slate-850">
-                  <span className="text-[10px] uppercase tracking-wider text-slate-500 block mb-1 font-bold">Projected Net ROI ({calcCurrency})</span>
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-1">
-                      <span className={`text-xl sm:text-2xl font-mono font-extrabold ${netProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                        {netProfit >= 0 ? "+" : ""}
-                        {calcSymbol}{Math.round(netProfit).toLocaleString()}
+                {/* Right Side Instant DCA Outcome */}
+                <div className="bg-slate-950/80 p-5 rounded-xl border border-slate-800 flex flex-col justify-between space-y-4">
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">DCA Strategy Outcomes</span>
+                      <span className="text-[9px] uppercase px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 font-mono">
+                        {projectionMethod}
                       </span>
                     </div>
-                    <div className={`text-xs inline-flex items-center gap-1 font-bold ${netProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                      <ArrowUpRight className="w-3.5 h-3.5" />
-                      <span>{roiPercentage.toFixed(1)}% Potential Yield</span>
+
+                    <div className="space-y-2 text-xs">
+                      <div className="flex justify-between border-b border-slate-900/60 pb-1">
+                        <span className="text-slate-400">Total Capital Saved:</span>
+                        <span className="font-mono text-white font-bold">{calcSymbol}{Math.round(dcaTotalInvested).toLocaleString()}</span>
+                      </div>
+                      <div className="flex justify-between border-b border-slate-900/60 pb-1">
+                        <span className="text-slate-400">Total Purchase Intervals:</span>
+                        <span className="font-mono text-slate-300 font-bold">{dcaTotalPeriods} orders</span>
+                      </div>
+                      <div className="flex justify-between border-b border-slate-900/60 pb-1">
+                        <span className="text-slate-400">Accumulated BTC:</span>
+                        <span className="font-mono text-emerald-400 font-bold">{dcaAccumulatedBtc.toFixed(6)} BTC</span>
+                      </div>
+                      <div className="flex justify-between border-b border-slate-900/60 pb-1">
+                        <span className="text-slate-400">Estimated Cost Basis:</span>
+                        <span className="font-mono text-slate-300 font-bold">~{calcSymbol}{Math.round(dcaAvgCostBasis).toLocaleString()}</span>
+                      </div>
+                      <div className="flex justify-between border-b border-slate-900/60 pb-1">
+                        <span className="text-slate-400">Future Cycle Valuation:</span>
+                        <span className="font-mono text-white font-bold">{calcSymbol}{Math.round(dcaProjectedVal).toLocaleString()}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="pt-2 border-t border-slate-850">
+                    <span className="text-[10px] uppercase tracking-wider text-slate-500 block mb-1 font-bold">Projected Net Yield ({calcCurrency})</span>
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-1">
+                        <span className="text-xl sm:text-2xl font-mono font-extrabold text-emerald-400">
+                          +{calcSymbol}{Math.round(dcaNetProfit).toLocaleString()}
+                        </span>
+                      </div>
+                      <div className="text-xs inline-flex items-center gap-1 font-bold text-emerald-400">
+                        <ArrowUpRight className="w-3.5 h-3.5" />
+                        <span>{dcaRoiPercentage.toFixed(1)}% Compounded Return</span>
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
 
-            </div>
+              </div>
+            )}
           </div>
 
         </div>

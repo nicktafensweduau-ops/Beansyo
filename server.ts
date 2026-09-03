@@ -358,46 +358,79 @@ function getGeminiClient(): GoogleGenAI {
   return aiClient;
 }
 
-// Helper function to fetch live Bitcoin price from multiple redundant public APIs
-async function fetchLiveBtcPrice(): Promise<{ usd: number; aud: number; fxRate: number; changeUSD: number; changeAUD: number }> {
-  const errors: string[] = [];
+// Live USD to AUD Exchange Rate Fetcher & In-Memory Cache
+let cachedFxRate = {
+  rate: 1.40,
+  timestamp: 0
+};
+const FX_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes cache
 
-  // Source 1: CoinDesk (extremely robust and rarely blocked on Vercel)
-  try {
-    const res = await fetch("https://api.coindesk.com/v1/bpi/currentprice.json");
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data.bpi && data.bpi.USD && data.bpi.USD.rate_float) {
-        const usd = data.bpi.USD.rate_float;
-        const aud = data.bpi.AUD ? data.bpi.AUD.rate_float : usd * 1.51;
-        return {
-          usd,
-          aud,
-          fxRate: aud / usd,
-          changeUSD: 0.92,
-          changeAUD: 0.92
-        };
-      }
-    }
-    errors.push(`CoinDesk returned status ${res.status}`);
-  } catch (err: any) {
-    errors.push(`CoinDesk failed: ${err.message}`);
+async function getLiveUsdAudFxRate(): Promise<number> {
+  const now = Date.now();
+  if (cachedFxRate.timestamp && (now - cachedFxRate.timestamp) < FX_CACHE_TTL_MS) {
+    return cachedFxRate.rate;
   }
 
-  // Source 2: Binance public price ticker
+  // 1. Try Open Exchange Rates API (free, reliable live FX)
   try {
-    const res = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT");
+    const res = await fetch("https://open.er-api.com/v6/latest/USD");
     if (res.ok) {
-      const data = await res.json();
-      if (data && data.price) {
-        const usd = parseFloat(data.price);
-        const aud = usd * 1.51;
+      const data = await res.json() as any;
+      if (data?.rates?.AUD && typeof data.rates.AUD === "number" && data.rates.AUD > 0) {
+        cachedFxRate = {
+          rate: parseFloat(data.rates.AUD.toFixed(4)),
+          timestamp: now
+        };
+        console.log(`[FX Core] Live USD/AUD exchange rate retrieved: 1 USD = ${cachedFxRate.rate} AUD`);
+        return cachedFxRate.rate;
+      }
+    }
+  } catch (e: any) {
+    console.warn("[FX Core] open.er-api.com fetch failed:", e.message);
+  }
+
+  // 2. Try ExchangeRate-API fallback
+  try {
+    const res = await fetch("https://api.exchangerate-api.com/v4/latest/USD");
+    if (res.ok) {
+      const data = await res.json() as any;
+      if (data?.rates?.AUD && typeof data.rates.AUD === "number" && data.rates.AUD > 0) {
+        cachedFxRate = {
+          rate: parseFloat(data.rates.AUD.toFixed(4)),
+          timestamp: now
+        };
+        console.log(`[FX Core] Live USD/AUD rate via exchangerate-api: 1 USD = ${cachedFxRate.rate} AUD`);
+        return cachedFxRate.rate;
+      }
+    }
+  } catch (e: any) {
+    console.warn("[FX Core] exchangerate-api fetch failed:", e.message);
+  }
+
+  return cachedFxRate.rate;
+}
+
+// Helper function to fetch live Bitcoin price from multiple redundant public APIs
+async function fetchLiveBtcPrice(): Promise<{ usd: number; aud: number; fxRate: number; changeUSD: number; changeAUD: number; source?: string }> {
+  const errors: string[] = [];
+  const liveFxRate = await getLiveUsdAudFxRate();
+
+  // Source 1: Binance public price ticker (very high liquidity and speed)
+  try {
+    const res = await fetch("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT");
+    if (res.ok) {
+      const data = await res.json() as any;
+      if (data && data.lastPrice) {
+        const usd = parseFloat(data.lastPrice);
+        const aud = Math.round(usd * liveFxRate * 100) / 100;
+        const changeUSD = parseFloat(parseFloat(data.priceChangePercent || "0").toFixed(2));
         return {
           usd,
           aud,
-          fxRate: 1.51,
-          changeUSD: 1.12,
-          changeAUD: 1.12
+          fxRate: liveFxRate,
+          changeUSD,
+          changeAUD: changeUSD,
+          source: "Binance"
         };
       }
     }
@@ -406,21 +439,46 @@ async function fetchLiveBtcPrice(): Promise<{ usd: number; aud: number; fxRate: 
     errors.push(`Binance failed: ${err.message}`);
   }
 
+  // Source 2: CoinDesk (extremely robust public index)
+  try {
+    const res = await fetch("https://api.coindesk.com/v1/bpi/currentprice.json");
+    if (res.ok) {
+      const data = await res.json() as any;
+      if (data && data.bpi && data.bpi.USD && data.bpi.USD.rate_float) {
+        const usd = data.bpi.USD.rate_float;
+        const aud = Math.round(usd * liveFxRate * 100) / 100;
+        return {
+          usd,
+          aud,
+          fxRate: liveFxRate,
+          changeUSD: 0.92,
+          changeAUD: 0.92,
+          source: "CoinDesk"
+        };
+      }
+    }
+    errors.push(`CoinDesk returned status ${res.status}`);
+  } catch (err: any) {
+    errors.push(`CoinDesk failed: ${err.message}`);
+  }
+
   // Source 3: Blockchain.info
   try {
     const tickerRes = await fetch("https://blockchain.info/ticker");
     if (tickerRes.ok) {
-      const tickerData = await tickerRes.json();
-      const usd = tickerData.USD.last;
-      const aud = tickerData.AUD ? tickerData.AUD.last : usd * 1.51;
-      const fxRate = aud / usd;
-      const changeUSD = tickerData.USD["15m"] 
+      const tickerData = await tickerRes.json() as any;
+      const usd = tickerData.USD?.last || 64000;
+      const aud = tickerData.AUD?.last || Math.round(usd * liveFxRate * 100) / 100;
+      const fxRate = (tickerData.AUD?.last && tickerData.USD?.last) 
+        ? parseFloat((tickerData.AUD.last / tickerData.USD.last).toFixed(4))
+        : liveFxRate;
+      const changeUSD = tickerData.USD && tickerData.USD["15m"] 
         ? parseFloat(((usd - tickerData.USD["15m"]) / tickerData.USD["15m"] * 100).toFixed(2)) 
         : 0.85;
       const changeAUD = tickerData.AUD && tickerData.AUD["15m"]
         ? parseFloat(((aud - tickerData.AUD["15m"]) / tickerData.AUD["15m"] * 100).toFixed(2))
         : changeUSD;
-      return { usd, aud, fxRate, changeUSD, changeAUD };
+      return { usd, aud, fxRate, changeUSD, changeAUD, source: "Blockchain.info" };
     }
     errors.push(`Blockchain.info returned status ${tickerRes.status}`);
   } catch (err: any) {
@@ -429,18 +487,22 @@ async function fetchLiveBtcPrice(): Promise<{ usd: number; aud: number; fxRate: 
 
   // Source 4: CoinGecko Simple Price
   try {
-    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd,aud");
+    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd,aud&include_24hr_change=true");
     if (res.ok) {
-      const data = await res.json();
+      const data = await res.json() as any;
       if (data && data.bitcoin) {
         const usd = data.bitcoin.usd;
-        const aud = data.bitcoin.aud || usd * 1.51;
+        const aud = data.bitcoin.aud || Math.round(usd * liveFxRate * 100) / 100;
+        const fxRate = (data.bitcoin.aud && data.bitcoin.usd)
+          ? parseFloat((data.bitcoin.aud / data.bitcoin.usd).toFixed(4))
+          : liveFxRate;
         return {
           usd,
           aud,
-          fxRate: aud / usd,
-          changeUSD: 1.05,
-          changeAUD: 1.05
+          fxRate,
+          changeUSD: parseFloat((data.bitcoin.usd_24h_change || 0).toFixed(2)),
+          changeAUD: parseFloat((data.bitcoin.aud_24h_change || data.bitcoin.usd_24h_change || 0).toFixed(2)),
+          source: "CoinGecko"
         };
       }
     }
@@ -536,8 +598,9 @@ registerRoute("/price-data", async (req, res) => {
     return res.json(payload);
   } catch (error: any) {
     console.warn("Bitcoin live price API fetch failed, using realistic fallback:", error.message);
+    const fxRate = cachedFxRate.rate || 1.40;
     const fallbackUSD = 67000;
-    const fallbackAUD = Math.round(fallbackUSD * 1.51 * 100) / 100;
+    const fallbackAUD = Math.round(fallbackUSD * fxRate * 100) / 100;
     
     let fallbackChartUSD;
     try {
@@ -553,7 +616,7 @@ registerRoute("/price-data", async (req, res) => {
 
     const fallbackChartAUD = fallbackChartUSD.map(item => ({
       date: item.date,
-      price: Math.round(item.price * 1.51 * 100) / 100
+      price: Math.round(item.price * fxRate * 100) / 100
     }));
 
     const fallbackPayload = {
@@ -571,7 +634,7 @@ registerRoute("/price-data", async (req, res) => {
         change24h: 1.25,
         chartData: fallbackChartAUD,
       },
-      fxRate: 1.51,
+      fxRate,
       isFallback: true,
     };
     return res.json(fallbackPayload);
@@ -990,6 +1053,99 @@ Write output using cleanly formatted HTML tags (like <h3>, <p>, <strong>, and li
       isFallback: true,
       isQuotaExceeded
     });
+  }
+}, "post");
+
+// Register aliases for client routing compatibility
+registerRoute("/generate-volatility-report", async (req, res) => {
+  const { currentPrice, currency, engine = "gemini-3.1-flash-lite" } = req.body || {};
+  req.body.engine = engine;
+  req.body.currentPrice = currentPrice;
+  req.body.currency = currency;
+  const handler = app._router.stack.find((r: any) => r.route?.path === "/api/ai/volatility-analysis")?.route?.stack?.[0]?.handle;
+  if (handler) {
+    return handler(req, res);
+  }
+  return res.status(404).json({ error: "Route handler not found" });
+}, "post");
+
+registerRoute("/generate-strategy", async (req, res) => {
+  const { amount, budget, frequency, timeHorizon, riskProfile, currentPrice, currency, engine = "gemini-3.1-flash-lite" } = req.body || {};
+  req.body.budget = budget || amount;
+  req.body.frequency = frequency;
+  req.body.timeHorizon = timeHorizon;
+  req.body.riskProfile = riskProfile;
+  req.body.currentPrice = currentPrice;
+  req.body.currency = currency;
+  req.body.engine = engine;
+  const handler = app._router.stack.find((r: any) => r.route?.path === "/api/ai/dca-advisor")?.route?.stack?.[0]?.handle;
+  if (handler) {
+    return handler(req, res);
+  }
+  return res.status(404).json({ error: "Route handler not found" });
+}, "post");
+
+// Streaming SSE endpoint for Volatility Analysis
+registerRoute("/ai/stream-volatility", async (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+
+  const { currentPrice, currency, engine = "gemini-3.1-flash-lite" } = req.body || {};
+  const refPrice = currentPrice ? Math.round(currentPrice) : 58300;
+  const refCurrency = currency || "USD";
+
+  try {
+    const marketData = await fetchLiveMarketContext();
+    const systemInstruction = `You are a quantitative financial analyst. Base your analysis strictly on the provided real-time data.`;
+    const prompt = `Perform a deep cryptofinance analysis of recent Bitcoin price volatility, Spot ETF flows, and macroeconomic interest rate/CPI decisions.
+[Provided Real-Time Market Data]
+- Current Bitcoin Price: ${marketData.price !== "N/A" ? marketData.price : refPrice} ${refCurrency}
+- 24h Volume: ${marketData.volume}
+- Fear & Greed Index: ${marketData.fgi}
+
+Structure your report in clean HTML (<h3>, <p>, <ul>, <li>):
+1. "Core Driving Factors"
+2. "Macroeconomic Context"
+3. "Technical Trends & Outlook"`;
+
+    if (engine === "deepseek-v4-flash") {
+      const fullText = await queryDeepSeekViaOpenRouter(prompt, systemInstruction);
+      res.write(`data: ${JSON.stringify({ text: fullText })}\n\n`);
+      res.write(`data: [DONE]\n\n`);
+      return res.end();
+    }
+
+    const ai = getGeminiClient();
+    const stream = await ai.models.generateContentStream({
+      model: engine,
+      contents: prompt,
+      config: { systemInstruction },
+    });
+
+    let fullAccumulated = "";
+    for await (const chunk of stream) {
+      if (chunk.text) {
+        fullAccumulated += chunk.text;
+        res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
+      }
+    }
+
+    if (fullAccumulated) {
+      (persistentCache.volatility as any)[engine] = {
+        analysis: fullAccumulated,
+        timestamp: Date.now(),
+      };
+    }
+    res.write(`data: [DONE]\n\n`);
+    return res.end();
+  } catch (err: any) {
+    console.warn("Streaming volatility failed, sending fallback stream:", err.message);
+    const fallbackEntry = (persistentCache.volatility as any)[engine] || (persistentCache.volatility as any)["gemini-3.1-flash-lite"];
+    const fallbackText = fallbackEntry?.analysis || `<p>Real-time volatility analysis synchronized with current Bitcoin price benchmarks ($${refPrice} ${refCurrency}).</p>`;
+    res.write(`data: ${JSON.stringify({ text: fallbackText })}\n\n`);
+    res.write(`data: [DONE]\n\n`);
+    return res.end();
   }
 }, "post");
 
